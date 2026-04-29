@@ -118,6 +118,7 @@ final class CodexMobileStore: ObservableObject {
     private let credentialStore = PairingCredentialStore()
     private var client = AppServerWebSocketClient()
     private var eventTask: Task<Void, Never>?
+    private var threadListRefreshTask: Task<Void, Never>?
     private var didAttemptRestore = false
     private var isDesignPreviewMode = false
     private var oversizedHistoryThreadIDs = Set<String>()
@@ -257,6 +258,7 @@ final class CodexMobileStore: ObservableObject {
             try? credentialStore.save(payload)
         }
         eventTask?.cancel()
+        threadListRefreshTask?.cancel()
         client.disconnect()
         client = AppServerWebSocketClient()
         observeEvents()
@@ -288,6 +290,7 @@ final class CodexMobileStore: ObservableObject {
     func disconnect() {
         isDesignPreviewMode = false
         eventTask?.cancel()
+        threadListRefreshTask?.cancel()
         client.disconnect()
         selectedThread = nil
         conversation = ConversationState()
@@ -319,6 +322,7 @@ final class CodexMobileStore: ObservableObject {
     func loadDesignPreview() {
         isDesignPreviewMode = true
         eventTask?.cancel()
+        threadListRefreshTask?.cancel()
         client.disconnect()
         let preview = CodexMobileStore.preview()
         connectionState = .preview
@@ -344,7 +348,26 @@ final class CodexMobileStore: ObservableObject {
 
     func loadThreads() async throws {
         let value = try await client.listThreads()
+        let currentThreadID = selectedThread?.id
         threads = CodexThread.parseListResponse(value)
+        if let currentThreadID,
+           let updatedThread = threads.first(where: { $0.id == currentThreadID })
+        {
+            selectedThread = updatedThread
+        } else if let selectedThread,
+                  !threads.contains(where: { $0.id == selectedThread.id })
+        {
+            threads.insert(selectedThread, at: 0)
+        }
+    }
+
+    func refreshThreads() async {
+        guard isConnected, !isDesignPreviewMode else { return }
+        do {
+            try await loadThreads()
+        } catch {
+            // Sidebar refresh should not disrupt the active thread.
+        }
     }
 
     func startNewThread() async {
@@ -371,8 +394,10 @@ final class CodexMobileStore: ObservableObject {
             if !threads.contains(where: { $0.id == thread.id }) {
                 threads.insert(thread, at: 0)
             }
+            sortThreads()
             conversation = ConversationState(threadID: thread.id)
             historyContentNotice = nil
+            try? await loadThreads()
         } catch {
             connectionState = .disconnected(error.localizedDescription)
         }
@@ -443,6 +468,7 @@ final class CodexMobileStore: ObservableObject {
             connectionState = .running
             let cwd = selectedThread?.cwd.isEmpty == false ? selectedThread?.cwd ?? "" : pairing?.cwd ?? ""
             _ = try await client.startTurn(threadID: threadID, text: text, cwd: cwd, settings: currentSessionSettings)
+            scheduleThreadListRefresh()
         } catch {
             if composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 composerText = text
@@ -595,6 +621,7 @@ final class CodexMobileStore: ObservableObject {
         eventTask = Task { @MainActor in
             for await event in observedClient.events {
                 guard self.client === observedClient else { continue }
+                syncThreadMetadata(from: event)
                 // Filter out events that belong to a different thread so
                 // a slow response from a previous thread can't corrupt
                 // the current conversation.
@@ -623,6 +650,131 @@ final class CodexMobileStore: ObservableObject {
         }
     }
 
+    private func syncThreadMetadata(from event: AppServerEvent) {
+        guard case let .notification(method, params) = event else { return }
+        let object = params?.objectValue ?? [:]
+        switch method {
+        case "thread/started":
+            if let thread = object["thread"].flatMap(CodexThread.parse) {
+                upsertThread(thread)
+            } else {
+                scheduleThreadListRefresh()
+            }
+        case "thread/name/updated":
+            guard let threadID = object["threadId"]?.stringValue else {
+                scheduleThreadListRefresh()
+                return
+            }
+            updateThread(id: threadID) { thread in
+                thread.name = object["threadName"]?.stringValue
+            }
+            scheduleThreadListRefresh()
+        case "thread/status/changed":
+            guard let threadID = object["threadId"]?.stringValue else { return }
+            updateThread(id: threadID) { thread in
+                thread.status = object["status"]?.stringValue ?? thread.status
+                thread.updatedAt = Date()
+            }
+        case "thread/archived":
+            if let threadID = object["threadId"]?.stringValue {
+                threads.removeAll { $0.id == threadID }
+                if selectedThread?.id == threadID {
+                    selectedThread = nil
+                    conversation = ConversationState()
+                }
+            }
+        case "thread/unarchived":
+            scheduleThreadListRefresh()
+        case "thread/closed":
+            guard let threadID = object["threadId"]?.stringValue else { return }
+            updateThread(id: threadID) { thread in
+                thread.status = "notLoaded"
+            }
+        case "turn/started":
+            if let threadID = event.threadID {
+                updateThread(id: threadID) { thread in
+                    thread.status = "running"
+                    thread.updatedAt = Date()
+                }
+            }
+        case "turn/completed":
+            if let threadID = event.threadID {
+                updateThread(id: threadID) { thread in
+                    thread.status = "loaded"
+                    thread.updatedAt = Date()
+                }
+            }
+            scheduleThreadListRefresh()
+        default:
+            break
+        }
+    }
+
+    private func upsertThread(_ incoming: CodexThread) {
+        if let index = threads.firstIndex(where: { $0.id == incoming.id }) {
+            threads[index] = mergeThread(existing: threads[index], incoming: incoming)
+        } else {
+            threads.insert(incoming, at: 0)
+        }
+        if let selectedThread, selectedThread.id == incoming.id {
+            self.selectedThread = mergeThread(existing: selectedThread, incoming: incoming)
+        }
+        sortThreads()
+    }
+
+    private func updateThread(id: String, _ update: (inout CodexThread) -> Void) {
+        if let index = threads.firstIndex(where: { $0.id == id }) {
+            update(&threads[index])
+            if selectedThread?.id == id {
+                selectedThread = threads[index]
+            }
+            sortThreads()
+        } else {
+            scheduleThreadListRefresh()
+        }
+    }
+
+    private func mergeThread(existing: CodexThread, incoming: CodexThread) -> CodexThread {
+        CodexThread(
+            id: incoming.id,
+            name: incoming.name ?? existing.name,
+            preview: incoming.preview.isEmpty ? existing.preview : incoming.preview,
+            cwd: incoming.cwd.isEmpty ? existing.cwd : incoming.cwd,
+            status: incoming.status.isEmpty ? existing.status : incoming.status,
+            updatedAt: incoming.updatedAt ?? existing.updatedAt
+        )
+    }
+
+    private func sortThreads() {
+        threads.sort { lhs, rhs in
+            switch (lhs.updatedAt, rhs.updatedAt) {
+            case let (left?, right?):
+                return left > right
+            case (_?, nil):
+                return true
+            case (nil, _?):
+                return false
+            case (nil, nil):
+                return lhs.displayTitle.localizedCompare(rhs.displayTitle) == .orderedAscending
+            }
+        }
+    }
+
+    private func scheduleThreadListRefresh(delay: Duration = .milliseconds(800)) {
+        guard !isDesignPreviewMode else { return }
+        threadListRefreshTask?.cancel()
+        threadListRefreshTask = Task { @MainActor in
+            do {
+                try await Task.sleep(for: delay)
+                guard self.isConnected else { return }
+                try await self.loadThreads()
+            } catch is CancellationError {
+            } catch {
+                // Metadata refresh is opportunistic; keep the active conversation intact.
+            }
+        }
+    }
+
     private func handleOversizedHistory(thread: CodexThread) async {
         guard selectedThread?.id == thread.id else { return }
         oversizedHistoryThreadIDs.insert(thread.id)
@@ -642,6 +794,7 @@ final class CodexMobileStore: ObservableObject {
         isDesignPreviewMode = false
         connectionState = .connecting
         eventTask?.cancel()
+        threadListRefreshTask?.cancel()
         client.disconnect(emitEvent: false)
         client = AppServerWebSocketClient()
         observeEvents()

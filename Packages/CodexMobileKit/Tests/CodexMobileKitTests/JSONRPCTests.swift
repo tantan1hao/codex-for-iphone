@@ -36,10 +36,14 @@ final class JSONRPCTests: XCTestCase {
         let notification = AppServerEvent.notification(method: "item/started", params: ["threadId": "thr_1"])
         let nestedNotification = AppServerEvent.notification(method: "thread/updated", params: ["thread": ["id": "thr_2"]])
         let request = AppServerEvent.serverRequest(id: .int(4), method: "item/tool/requestUserInput", params: ["threadId": "thr_3"])
+        let turnNotification = AppServerEvent.notification(method: "turn/completed", params: ["threadId": "thr_4", "turn": ["id": "turn_1"]])
+        let nameNotification = AppServerEvent.notification(method: "thread/name/updated", params: ["threadId": "thr_5", "threadName": "New title"])
 
         XCTAssertEqual(notification.threadID, "thr_1")
         XCTAssertEqual(nestedNotification.threadID, "thr_2")
         XCTAssertEqual(request.threadID, "thr_3")
+        XCTAssertEqual(turnNotification.threadID, "thr_4")
+        XCTAssertEqual(nameNotification.threadID, "thr_5")
     }
 
     func testBuildsSafeThreadResumeParams() {

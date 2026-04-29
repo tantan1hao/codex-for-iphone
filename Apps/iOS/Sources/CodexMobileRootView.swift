@@ -219,6 +219,9 @@ struct CodexSidebar: View {
                 endPoint: .bottomTrailing
             )
         )
+        .task {
+            await store.refreshThreads()
+        }
     }
 
     private var sidebarTopChrome: some View {
@@ -407,6 +410,9 @@ struct CompactThreadListView: View {
                 }
                 .padding(18)
             }
+        }
+        .task {
+            await store.refreshThreads()
         }
     }
 
