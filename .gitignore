@@ -3,3 +3,4 @@ DerivedData/
 CodexMobile.xcodeproj/
 .build/
 xcuserdata/
+node_modules/

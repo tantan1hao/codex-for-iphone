@@ -8,6 +8,7 @@ struct HelperMenuView: View {
         VStack(alignment: .leading, spacing: 16) {
             header
             workspace
+            relay
             if let image = controller.qrImage, let payload = controller.pairingPayload {
                 qrBlock(image: image, payload: payload)
             } else {
@@ -56,6 +57,20 @@ struct HelperMenuView: View {
         .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
     }
 
+    private var relay: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Toggle("Relay", isOn: $controller.useRelay)
+            TextField("wss://relay.example.com/codex-mobile", text: $controller.relayURLText)
+                .textFieldStyle(.roundedBorder)
+                .disabled(!controller.useRelay)
+            Text("Use this when the phone is outside the LAN or VPN. The relay only forwards WebSocket frames.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(10)
+        .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+    }
+
     private func qrBlock(image: NSImage, payload: PairingPayload) -> some View {
         VStack(alignment: .center, spacing: 10) {
             Image(nsImage: image)
@@ -63,7 +78,7 @@ struct HelperMenuView: View {
                 .resizable()
                 .frame(width: 220, height: 220)
                 .background(.white, in: RoundedRectangle(cornerRadius: 8))
-            Text("\(payload.host):\(payload.port)")
+            Text(payload.connectionTargetDescription)
                 .font(.system(.caption, design: .monospaced))
                 .foregroundStyle(.secondary)
             Button {
@@ -125,6 +140,10 @@ struct HelperSettingsView: View {
             }
             LabeledContent("Port") {
                 Text(controller.port.map(String.init) ?? "None")
+            }
+            LabeledContent("Relay") {
+                Text(controller.useRelay ? controller.relayURLText : "Off")
+                    .font(.system(.body, design: .monospaced))
             }
         }
         .padding()

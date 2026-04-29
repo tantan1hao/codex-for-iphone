@@ -23,18 +23,46 @@ public final class AppServerWebSocketClient {
     }
 
     public func connect(to pairing: PairingPayload, appVersion: String) async throws {
-        try await checkReady(to: pairing)
+        if !pairing.usesRelay {
+            try await checkReady(to: pairing)
+        }
         var request = URLRequest(url: pairing.websocketURL)
         request.setValue("Bearer \(pairing.token)", forHTTPHeaderField: "Authorization")
         let socket = URLSession.shared.webSocketTask(with: request)
         self.task = socket
         socket.resume()
+        if pairing.usesRelay {
+            try await registerRelay(pairing: pairing)
+        }
         startReceiveLoop()
         do {
             try await initialize(appVersion: appVersion)
         } catch {
             disconnect(emitEvent: false)
             throw error
+        }
+    }
+
+    private func registerRelay(pairing: PairingPayload) async throws {
+        guard let socket = task,
+              let room = pairing.relayRoom
+        else {
+            throw AppServerClientError.transport("Relay pairing is missing its room.")
+        }
+        let registration = CodexRelayRegistration(
+            role: .phone,
+            room: room,
+            name: "Codex Mobile",
+            token: pairing.token,
+            metadata: [
+                "adapter": "codex_mobile_ios",
+                "cwd": .string(pairing.cwd),
+            ]
+        )
+        try await socket.send(.string(CodexRelayWire.registrationString(registration)))
+        let acknowledgement = try CodexRelayWire.acknowledgement(from: try await socket.receive())
+        guard acknowledgement.type == "register_ack", acknowledgement.ok else {
+            throw AppServerClientError.transport(acknowledgement.error ?? "Relay registration was rejected.")
         }
     }
 
@@ -96,6 +124,8 @@ public final class AppServerWebSocketClient {
             "approvalsReviewer": "user",
             "approvalPolicy": settings.permissionPreset.approvalPolicy,
             "sandbox": settings.permissionPreset.sandboxMode,
+            "experimentalRawEvents": false,
+            "persistExtendedHistory": true,
         ]
         if let model = settings.model {
             params["model"] = .string(model)
@@ -115,6 +145,7 @@ public final class AppServerWebSocketClient {
     public func startTurn(threadID: String, text: String, cwd: String, settings: CodexSessionSettings) async throws -> JSONValue {
         var params: [String: JSONValue] = [
             "threadId": .string(threadID),
+            "cwd": .string(cwd),
             "input": [
                 [
                     "type": "text",
@@ -197,8 +228,9 @@ public final class AppServerWebSocketClient {
                 do {
                     try await self.send(message: .request(id: id, method: method, params: params))
                 } catch {
-                    self.pendingRequests.removeValue(forKey: id)
-                    continuation.resume(throwing: error)
+                    if let pending = self.pendingRequests.removeValue(forKey: id) {
+                        pending.resume(throwing: error)
+                    }
                 }
             }
         }
@@ -223,7 +255,7 @@ public final class AppServerWebSocketClient {
             while let task = self.task {
                 do {
                     let message = try await task.receive()
-                    try self.handle(webSocketMessage: message)
+                    try await self.handle(webSocketMessage: message)
                 } catch {
                     self.eventContinuation.yield(.disconnected(error.localizedDescription))
                     self.failPendingRequests(error)
@@ -236,17 +268,22 @@ public final class AppServerWebSocketClient {
         }
     }
 
-    private func handle(webSocketMessage: URLSessionWebSocketTask.Message) throws {
-        let data: Data
-        switch webSocketMessage {
-        case let .string(value):
-            data = Data(value.utf8)
-        case let .data(value):
-            data = value
-        @unknown default:
-            throw AppServerClientError.malformedMessage
+    private func handle(webSocketMessage: URLSessionWebSocketTask.Message) async throws {
+        if let control = CodexRelayWire.control(from: webSocketMessage) {
+            switch control.type {
+            case "ping":
+                try await task?.send(CodexRelayWire.pongMessage())
+                return
+            case "pong", "register_ack":
+                return
+            case "relay_error":
+                throw AppServerClientError.transport(control.error ?? "Relay connection failed.")
+            default:
+                break
+            }
         }
 
+        let data = try CodexRelayWire.data(from: webSocketMessage)
         let message = try decoder.decode(JSONRPCMessage.self, from: data)
         if let method = message.method, let id = message.id {
             eventContinuation.yield(.serverRequest(id: id, method: method, params: message.params))

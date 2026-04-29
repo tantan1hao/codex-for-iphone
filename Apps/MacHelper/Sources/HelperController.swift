@@ -6,6 +6,7 @@ import SwiftUI
 enum HelperStatus: Equatable {
     case stopped
     case starting
+    case relayConnecting
     case ready
     case failed(String)
 
@@ -13,6 +14,7 @@ enum HelperStatus: Equatable {
         switch self {
         case .stopped: "Stopped"
         case .starting: "Starting"
+        case .relayConnecting: "Relay"
         case .ready: "Ready"
         case .failed: "Failed"
         }
@@ -22,6 +24,7 @@ enum HelperStatus: Equatable {
         switch self {
         case .stopped: "Start the helper to pair your iPhone or iPad."
         case .starting: "Launching Codex app-server and waiting for readiness."
+        case .relayConnecting: "Opening the outbound relay tunnel."
         case .ready: "Scan the QR code from Codex Mobile."
         case let .failed(message): message
         }
@@ -30,7 +33,7 @@ enum HelperStatus: Equatable {
     var tint: Color {
         switch self {
         case .ready: .green
-        case .starting: .blue
+        case .starting, .relayConnecting: .blue
         case .stopped: .secondary
         case .failed: .red
         }
@@ -45,9 +48,12 @@ final class HelperController: ObservableObject {
     @Published var qrImage: NSImage?
     @Published var port: Int?
     @Published var codexBinaryPath: String?
+    @Published var useRelay = false
+    @Published var relayURLText = UserDefaults.standard.string(forKey: "CodexMobileHelper.relayURL") ?? ""
 
     private var process: Process?
     private var readinessTask: Task<Void, Never>?
+    private var relayBridge: AppServerRelayBridge?
 
     deinit {
         process?.terminate()
@@ -103,7 +109,9 @@ final class HelperController: ObservableObject {
                 host: NetworkIdentity.primaryLANAddress(),
                 port: selectedPort,
                 token: token,
-                cwd: workspacePath
+                cwd: workspacePath,
+                relayURL: selectedRelayURL(),
+                relayRoom: selectedRelayRoom()
             )
             pairingPayload = payload
             qrImage = Self.makeQRCode(from: payload.deepLinkURL.absoluteString)
@@ -117,6 +125,8 @@ final class HelperController: ObservableObject {
     func stop() {
         readinessTask?.cancel()
         readinessTask = nil
+        relayBridge?.stop()
+        relayBridge = nil
         stopProcessOnly()
         status = .stopped
         pairingPayload = nil
@@ -148,6 +158,17 @@ final class HelperController: ObservableObject {
                     request.timeoutInterval = 1
                     let (_, response) = try await URLSession.shared.data(for: request)
                     if (response as? HTTPURLResponse)?.statusCode == 200 {
+                        if let payload = pairingPayload, payload.usesRelay {
+                            status = .relayConnecting
+                            do {
+                                let bridge = AppServerRelayBridge()
+                                try await bridge.start(pairing: payload)
+                                relayBridge = bridge
+                            } catch {
+                                status = .failed(error.localizedDescription)
+                                return
+                            }
+                        }
                         status = .ready
                         return
                     }
@@ -157,6 +178,21 @@ final class HelperController: ObservableObject {
             }
             status = .failed("Codex app-server did not become ready on port \(port).")
         }
+    }
+
+    private func selectedRelayURL() throws -> URL? {
+        guard useRelay else { return nil }
+        let trimmed = relayURLText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let url = URL(string: trimmed) else {
+            throw HelperError.invalidRelayURL
+        }
+        UserDefaults.standard.set(trimmed, forKey: "CodexMobileHelper.relayURL")
+        return url
+    }
+
+    private func selectedRelayRoom() -> String? {
+        guard useRelay else { return nil }
+        return UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
     }
 
     private static func makeQRCode(from text: String) -> NSImage? {
@@ -174,11 +210,14 @@ final class HelperController: ObservableObject {
 
 enum HelperError: LocalizedError {
     case codexBinaryMissing
+    case invalidRelayURL
 
     var errorDescription: String? {
         switch self {
         case .codexBinaryMissing:
             "Could not find Codex. Install Codex.app or make `codex` available on PATH."
+        case .invalidRelayURL:
+            "Enter a relay WebSocket URL such as wss://relay.example.com/codex-mobile."
         }
     }
 }
@@ -203,4 +242,3 @@ extension HelperController {
         return controller
     }
 }
-

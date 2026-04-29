@@ -22,6 +22,7 @@ struct CodexMobileApp: App {
 
 enum MobileConnectionState: Equatable {
     case unpaired
+    case preview
     case connecting
     case connected
     case codexUnavailable(String)
@@ -32,6 +33,7 @@ enum MobileConnectionState: Equatable {
     var title: String {
         switch self {
         case .unpaired: "未配对"
+        case .preview: "界面预览"
         case .connecting: "连接中"
         case .connected: "已连接"
         case .codexUnavailable: "Codex 未启动"
@@ -44,7 +46,8 @@ enum MobileConnectionState: Equatable {
     var detail: String {
         switch self {
         case .unpaired: "扫描 Helper 二维码，或粘贴配对链接。"
-        case .connecting: "正在打开局域网会话。"
+        case .preview: "当前是本地 UI 预览，不会连接电脑 Codex，也不会返回真实结果。"
+        case .connecting: "正在打开 Codex 连接。"
         case .connected: "可以开始或继续一个 Codex 会话。"
         case let .codexUnavailable(message): message
         case .tokenRejected: "配对 token 已失效，请从 Mac Helper 重新配对。"
@@ -56,6 +59,7 @@ enum MobileConnectionState: Equatable {
     var tint: Color {
         switch self {
         case .connected: .green
+        case .preview: .orange
         case .running, .connecting: .blue
         case .unpaired: .secondary
         case .codexUnavailable, .tokenRejected, .disconnected: .red
@@ -93,11 +97,15 @@ final class CodexMobileStore: ObservableObject {
     }
 
     var canReconnect: Bool {
-        pairing != nil && connectionState != .connecting && connectionState != .running
+        pairing != nil &&
+            !isDesignPreviewMode &&
+            connectionState != .connecting &&
+            connectionState != .running
     }
 
     var canSendComposer: Bool {
         isConnected &&
+            !isDesignPreviewMode &&
             !conversation.isRunning &&
             !isSendingComposer &&
             !composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -153,6 +161,10 @@ final class CodexMobileStore: ObservableObject {
         default:
             false
         }
+    }
+
+    var isPreviewMode: Bool {
+        isDesignPreviewMode
     }
 
     func restoreAndConnectIfNeeded() async {
@@ -246,7 +258,7 @@ final class CodexMobileStore: ObservableObject {
         eventTask?.cancel()
         client.disconnect()
         let preview = CodexMobileStore.preview()
-        connectionState = preview.connectionState
+        connectionState = .preview
         pairingText = preview.pairingText
         pairing = preview.pairing
         threads = preview.threads
@@ -303,10 +315,24 @@ final class CodexMobileStore: ObservableObject {
         guard isConnected, !isDesignPreviewMode else { return }
         do {
             let value = try await client.resumeThread(id: thread.id)
+            // Only apply if the user hasn't already switched away
+            guard selectedThread?.id == thread.id else { return }
             selectedThread = CodexThread.parseStartOrResumeResponse(value) ?? thread
             conversation = ConversationReducer.state(fromThreadResponse: value, fallbackThreadID: thread.id)
         } catch {
-            connectionState = .disconnected(error.localizedDescription)
+            // Don't tear down the whole connection just because one thread
+            // failed to resume — keep the composer usable.
+            guard selectedThread?.id == thread.id else { return }
+            var errorConversation = ConversationState(threadID: thread.id)
+            errorConversation.items.append(
+                ConversationItem(
+                    id: "resume-error-\(thread.id)",
+                    kind: .error,
+                    title: "无法加载会话",
+                    body: error.localizedDescription
+                )
+            )
+            conversation = errorConversation
         }
     }
 
@@ -320,35 +346,15 @@ final class CodexMobileStore: ObservableObject {
         }
         guard let threadID = selectedThread?.id else { return }
         composerText = ""
-        let userItem = ConversationItem(id: UUID().uuidString, kind: .user, title: "You", body: text)
-        var updatedConversation = conversation
-        updatedConversation.items.append(userItem)
-        conversation = updatedConversation
-        if isDesignPreviewMode {
-            updatedConversation = conversation
-            updatedConversation.items.append(
-                ConversationItem(
-                    id: UUID().uuidString,
-                    kind: .assistant,
-                    title: "Codex",
-                    body: "预览模式已收到消息。真实连接后会通过 Codex app-server 返回流式回复。"
-                )
-            )
-            conversation = updatedConversation
-            return
-        }
         do {
             connectionState = .running
             let cwd = selectedThread?.cwd.isEmpty == false ? selectedThread?.cwd ?? "" : pairing?.cwd ?? ""
             _ = try await client.startTurn(threadID: threadID, text: text, cwd: cwd, settings: currentSessionSettings)
         } catch {
-            updatedConversation = conversation
-            if let index = updatedConversation.items.firstIndex(where: { $0.id == userItem.id }) {
-                updatedConversation.items[index].status = "failed"
-            }
             if composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 composerText = text
             }
+            var updatedConversation = conversation
             updatedConversation.items.append(
                 ConversationItem(
                     id: UUID().uuidString,
@@ -436,6 +442,15 @@ final class CodexMobileStore: ObservableObject {
         eventTask?.cancel()
         eventTask = Task { @MainActor in
             for await event in client.events {
+                // Filter out events that belong to a different thread so
+                // a slow response from a previous thread can't corrupt
+                // the current conversation.
+                if let eventThreadID = event.threadID,
+                   let currentThreadID = conversation.threadID,
+                   eventThreadID != currentThreadID
+                {
+                    continue
+                }
                 var updatedConversation = conversation
                 ConversationReducer.reduce(&updatedConversation, event: event)
                 conversation = updatedConversation
@@ -559,7 +574,7 @@ final class CodexMobileStore: ObservableObject {
 extension CodexMobileStore {
     static func preview() -> CodexMobileStore {
         let store = CodexMobileStore()
-        store.connectionState = .connected
+        store.connectionState = .preview
         let payload = try? PairingPayload(
             name: "Mac",
             host: "192.168.1.22",

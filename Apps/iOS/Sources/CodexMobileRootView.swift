@@ -662,6 +662,9 @@ struct WorkspaceHeader: View {
                 .font(.headline.weight(.semibold))
                 .foregroundStyle(CodexTheme.text)
                 .lineLimit(1)
+            if store.isPreviewMode {
+                previewBadge
+            }
             Spacer(minLength: 8)
             Button {
                 store.isSettingsPresented = true
@@ -680,6 +683,9 @@ struct WorkspaceHeader: View {
             Text(store.pairing?.name ?? "mac")
                 .font(.headline)
                 .foregroundStyle(CodexTheme.tertiaryText)
+            if store.isPreviewMode {
+                previewBadge
+            }
             Button {
                 store.isSettingsPresented = true
             } label: {
@@ -687,6 +693,15 @@ struct WorkspaceHeader: View {
             }
             Spacer()
         }
+    }
+
+    private var previewBadge: some View {
+        Text("预览")
+            .font(.caption2.weight(.bold))
+            .foregroundStyle(.orange)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .background(.orange.opacity(0.16), in: Capsule())
     }
 }
 
@@ -786,7 +801,7 @@ struct ConnectionStatusCard: View {
                 .font(.caption)
                 .foregroundStyle(CodexTheme.secondaryText)
             if let pairing = store.pairing {
-                Text("\(pairing.name)  \(pairing.host):\(pairing.port)")
+                Text("\(pairing.name)  \(pairing.connectionTargetDescription)")
                     .font(.caption.monospaced())
                     .foregroundStyle(CodexTheme.tertiaryText)
                     .lineLimit(2)

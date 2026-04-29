@@ -81,6 +81,20 @@ public enum AppServerEvent: Equatable, Sendable {
     case notification(method: String, params: JSONValue?)
     case serverRequest(id: JSONRPCID, method: String, params: JSONValue?)
     case disconnected(String)
+
+    /// Best-effort extraction of the thread ID carried by an event so the
+    /// client can filter out stale events from a previously-selected thread.
+    public var threadID: String? {
+        switch self {
+        case let .notification(_, params):
+            return params?.objectValue?["threadId"]?.stringValue
+                ?? params?.objectValue?["thread"]?.objectValue?["id"]?.stringValue
+        case let .serverRequest(_, _, params):
+            return params?.objectValue?["threadId"]?.stringValue
+        case .disconnected:
+            return nil
+        }
+    }
 }
 
 public enum AppServerClientError: LocalizedError, Sendable {

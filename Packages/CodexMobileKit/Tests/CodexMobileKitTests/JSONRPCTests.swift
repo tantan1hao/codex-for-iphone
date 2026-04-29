@@ -31,5 +31,14 @@ final class JSONRPCTests: XCTestCase {
         XCTAssertEqual(message.method, "item/commandExecution/requestApproval")
         XCTAssertEqual(message.params?.objectValue?["command"]?.stringValue, "swift test")
     }
-}
 
+    func testExtractsThreadIDFromEvents() {
+        let notification = AppServerEvent.notification(method: "item/started", params: ["threadId": "thr_1"])
+        let nestedNotification = AppServerEvent.notification(method: "thread/updated", params: ["thread": ["id": "thr_2"]])
+        let request = AppServerEvent.serverRequest(id: .int(4), method: "item/tool/requestUserInput", params: ["threadId": "thr_3"])
+
+        XCTAssertEqual(notification.threadID, "thr_1")
+        XCTAssertEqual(nestedNotification.threadID, "thr_2")
+        XCTAssertEqual(request.threadID, "thr_3")
+    }
+}
