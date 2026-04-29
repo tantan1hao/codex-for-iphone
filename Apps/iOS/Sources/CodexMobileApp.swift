@@ -119,6 +119,8 @@ final class CodexMobileStore: ObservableObject {
     private var client = AppServerWebSocketClient()
     private var eventTask: Task<Void, Never>?
     private var threadListRefreshTask: Task<Void, Never>?
+    private var threadContentRefreshTask: Task<Void, Never>?
+    private var recentLocalTurnStarts: [String: Date] = [:]
     private var didAttemptRestore = false
     private var isDesignPreviewMode = false
     private var oversizedHistoryThreadIDs = Set<String>()
@@ -254,11 +256,13 @@ final class CodexMobileStore: ObservableObject {
         isLoadingMoreHistory = false
         historyNextCursor = nil
         historyContentNotice = nil
+        recentLocalTurnStarts.removeAll()
         if persist {
             try? credentialStore.save(payload)
         }
         eventTask?.cancel()
         threadListRefreshTask?.cancel()
+        threadContentRefreshTask?.cancel()
         client.disconnect()
         client = AppServerWebSocketClient()
         observeEvents()
@@ -291,6 +295,7 @@ final class CodexMobileStore: ObservableObject {
         isDesignPreviewMode = false
         eventTask?.cancel()
         threadListRefreshTask?.cancel()
+        threadContentRefreshTask?.cancel()
         client.disconnect()
         selectedThread = nil
         conversation = ConversationState()
@@ -301,6 +306,7 @@ final class CodexMobileStore: ObservableObject {
         isLoadingMoreHistory = false
         historyNextCursor = nil
         historyContentNotice = nil
+        recentLocalTurnStarts.removeAll()
         connectionState = pairing == nil ? .unpaired : .disconnected("已手动断开。")
     }
 
@@ -323,6 +329,7 @@ final class CodexMobileStore: ObservableObject {
         isDesignPreviewMode = true
         eventTask?.cancel()
         threadListRefreshTask?.cancel()
+        threadContentRefreshTask?.cancel()
         client.disconnect()
         let preview = CodexMobileStore.preview()
         connectionState = .preview
@@ -337,6 +344,7 @@ final class CodexMobileStore: ObservableObject {
         isLoadingMoreHistory = false
         historyNextCursor = nil
         historyContentNotice = nil
+        recentLocalTurnStarts.removeAll()
         isScannerPresented = false
         isSidebarPresented = false
         isSettingsPresented = false
@@ -349,11 +357,15 @@ final class CodexMobileStore: ObservableObject {
     func loadThreads() async throws {
         let value = try await client.listThreads()
         let currentThreadID = selectedThread?.id
+        let previousSelectedThread = selectedThread
         threads = CodexThread.parseListResponse(value)
         if let currentThreadID,
            let updatedThread = threads.first(where: { $0.id == currentThreadID })
         {
             selectedThread = updatedThread
+            if selectedThreadNeedsContentRefresh(previous: previousSelectedThread, updated: updatedThread) {
+                scheduleSelectedThreadContentRefresh()
+            }
         } else if let selectedThread,
                   !threads.contains(where: { $0.id == selectedThread.id })
         {
@@ -372,6 +384,7 @@ final class CodexMobileStore: ObservableObject {
 
     func startNewThread() async {
         guard let pairing else { return }
+        threadContentRefreshTask?.cancel()
         if isDesignPreviewMode {
             let thread = CodexThread(
                 id: "preview-\(UUID().uuidString)",
@@ -404,6 +417,7 @@ final class CodexMobileStore: ObservableObject {
     }
 
     func select(_ thread: CodexThread) async {
+        threadContentRefreshTask?.cancel()
         selectedThread = thread
         conversation = ConversationState(threadID: thread.id)
         historyNextCursor = nil
@@ -415,7 +429,11 @@ final class CodexMobileStore: ObservableObject {
             let value = try await client.resumeThread(id: thread.id)
             // Only apply if the user hasn't already switched away
             guard selectedThread?.id == thread.id else { return }
-            selectedThread = CodexThread.parseStartOrResumeResponse(value) ?? thread
+            if let resumedThread = CodexThread.parseStartOrResumeResponse(value) {
+                selectedThread = mergeThread(existing: thread, incoming: resumedThread)
+            } else {
+                selectedThread = thread
+            }
             if shouldLoadHistoryContent {
                 if oversizedHistoryThreadIDs.contains(thread.id) {
                     historyContentNotice = .oversized
@@ -467,6 +485,7 @@ final class CodexMobileStore: ObservableObject {
         do {
             connectionState = .running
             let cwd = selectedThread?.cwd.isEmpty == false ? selectedThread?.cwd ?? "" : pairing?.cwd ?? ""
+            recentLocalTurnStarts[threadID] = Date()
             _ = try await client.startTurn(threadID: threadID, text: text, cwd: cwd, settings: currentSessionSettings)
             scheduleThreadListRefresh()
         } catch {
@@ -675,6 +694,12 @@ final class CodexMobileStore: ObservableObject {
                 thread.status = object["status"]?.stringValue ?? thread.status
                 thread.updatedAt = Date()
             }
+            if threadID == selectedThread?.id,
+               object["status"]?.stringValue != "running",
+               !isRecentLocalTurn(threadID: threadID)
+            {
+                scheduleSelectedThreadContentRefresh()
+            }
         case "thread/archived":
             if let threadID = object["threadId"]?.stringValue {
                 threads.removeAll { $0.id == threadID }
@@ -702,6 +727,11 @@ final class CodexMobileStore: ObservableObject {
                 updateThread(id: threadID) { thread in
                     thread.status = "loaded"
                     thread.updatedAt = Date()
+                }
+                if threadID == selectedThread?.id,
+                   !isRecentLocalTurn(threadID: threadID)
+                {
+                    scheduleSelectedThreadContentRefresh()
                 }
             }
             scheduleThreadListRefresh()
@@ -775,6 +805,104 @@ final class CodexMobileStore: ObservableObject {
         }
     }
 
+    private func scheduleSelectedThreadContentRefresh(delay: Duration = .milliseconds(600)) {
+        guard !isDesignPreviewMode else { return }
+        threadContentRefreshTask?.cancel()
+        threadContentRefreshTask = Task { @MainActor in
+            do {
+                try await Task.sleep(for: delay)
+                await self.refreshSelectedThreadContent()
+            } catch is CancellationError {
+            } catch {
+                // Content refresh is opportunistic; keep the current transcript intact.
+            }
+        }
+    }
+
+    private func refreshSelectedThreadContent() async {
+        guard isConnected,
+              !isDesignPreviewMode,
+              !isLoadingHistoryContent,
+              !isLoadingMoreHistory,
+              let threadID = selectedThread?.id
+        else { return }
+
+        do {
+            let value = try await client.listThreadTurns(threadID: threadID, limit: Self.historyPageLimit)
+            guard selectedThread?.id == threadID else { return }
+            let refreshedState = ConversationReducer.state(fromTurnsListResponse: value, threadID: threadID)
+            mergeConversation(refreshedState)
+            if historyNextCursor == nil {
+                historyNextCursor = ConversationReducer.nextCursor(fromTurnsListResponse: value)
+            }
+        } catch {
+            guard selectedThread?.id == threadID else { return }
+            if isMessageTooLong(error), let selectedThread {
+                await handleOversizedHistory(thread: selectedThread)
+            }
+        }
+    }
+
+    private func mergeConversation(_ incoming: ConversationState) {
+        guard incoming.threadID == conversation.threadID else { return }
+        var updatedConversation = conversation
+        if shouldReplaceTail(existing: updatedConversation.items, incoming: incoming.items) {
+            updatedConversation.items.removeLast(incoming.items.count)
+            updatedConversation.items.append(contentsOf: incoming.items)
+            updatedConversation.isRunning = incoming.isRunning
+            updatedConversation.activeApproval = incoming.activeApproval ?? updatedConversation.activeApproval
+            updatedConversation.lastError = incoming.lastError ?? updatedConversation.lastError
+            conversation = updatedConversation
+            return
+        }
+        for incomingItem in incoming.items {
+            if let index = updatedConversation.items.firstIndex(where: { $0.id == incomingItem.id }) {
+                updatedConversation.items[index] = incomingItem
+            } else {
+                updatedConversation.items.append(incomingItem)
+            }
+        }
+        updatedConversation.isRunning = incoming.isRunning
+        updatedConversation.activeApproval = incoming.activeApproval ?? updatedConversation.activeApproval
+        updatedConversation.lastError = incoming.lastError ?? updatedConversation.lastError
+        conversation = updatedConversation
+    }
+
+    private func selectedThreadNeedsContentRefresh(previous: CodexThread?, updated: CodexThread) -> Bool {
+        guard previous?.id == updated.id else { return false }
+        guard !isRecentLocalTurn(threadID: updated.id) else { return false }
+        guard let previousDate = previous?.updatedAt,
+              let updatedDate = updated.updatedAt
+        else { return false }
+        return updatedDate.timeIntervalSince(previousDate) > 0.5
+    }
+
+    private func shouldReplaceTail(existing: [ConversationItem], incoming: [ConversationItem]) -> Bool {
+        guard !incoming.isEmpty, existing.count >= incoming.count else { return false }
+        let tail = Array(existing.suffix(incoming.count))
+        return zip(tail, incoming).allSatisfy { existingItem, incomingItem in
+            existingItem.id != incomingItem.id &&
+                existingItem.kind == incomingItem.kind &&
+                existingItem.title == incomingItem.title &&
+                normalizedTranscriptText(existingItem.body) == normalizedTranscriptText(incomingItem.body)
+        }
+    }
+
+    private func normalizedTranscriptText(_ value: String) -> String {
+        value.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func isRecentLocalTurn(threadID: String) -> Bool {
+        cleanupRecentLocalTurns()
+        guard let startedAt = recentLocalTurnStarts[threadID] else { return false }
+        return Date().timeIntervalSince(startedAt) < 20
+    }
+
+    private func cleanupRecentLocalTurns() {
+        let cutoff = Date().addingTimeInterval(-60)
+        recentLocalTurnStarts = recentLocalTurnStarts.filter { _, startedAt in startedAt > cutoff }
+    }
+
     private func handleOversizedHistory(thread: CodexThread) async {
         guard selectedThread?.id == thread.id else { return }
         oversizedHistoryThreadIDs.insert(thread.id)
@@ -795,6 +923,7 @@ final class CodexMobileStore: ObservableObject {
         connectionState = .connecting
         eventTask?.cancel()
         threadListRefreshTask?.cancel()
+        threadContentRefreshTask?.cancel()
         client.disconnect(emitEvent: false)
         client = AppServerWebSocketClient()
         observeEvents()
@@ -809,7 +938,7 @@ final class CodexMobileStore: ObservableObject {
                 if selectedThread?.id == resumeThreadID,
                    let resumedThread = CodexThread.parseStartOrResumeResponse(value)
                 {
-                    selectedThread = resumedThread
+                    selectedThread = mergeThread(existing: selectedThread ?? resumedThread, incoming: resumedThread)
                 }
             }
         } catch {
