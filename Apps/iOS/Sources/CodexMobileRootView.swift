@@ -1,5 +1,6 @@
 import CodexMobileKit
 import SwiftUI
+import UIKit
 
 private enum CodexTheme {
     static let appBackground = Color(red: 0.055, green: 0.055, blue: 0.055)
@@ -67,32 +68,133 @@ struct RegularCodexRoot: View {
 
 struct CompactCodexRoot: View {
     @EnvironmentObject private var store: CodexMobileStore
+    @GestureState private var sidebarDragTranslation: CGFloat = 0
 
     var body: some View {
-        ZStack(alignment: .leading) {
-            NavigationStack {
-                if store.pairing == nil {
-                    PairingView()
-                } else {
-                    CodexWorkspaceView()
+        GeometryReader { proxy in
+            let drawerWidth = min(proxy.size.width * 0.86, 336)
+            let progress = sidebarProgress(drawerWidth: drawerWidth)
+            ZStack(alignment: .leading) {
+                NavigationStack {
+                    if store.pairing == nil {
+                        PairingView()
+                    } else {
+                        CodexWorkspaceView()
+                    }
+                }
+                .background(CodexTheme.appBackground)
+
+                if progress > 0 {
+                    Color.black.opacity(0.48 * progress)
+                        .ignoresSafeArea()
+                        .transition(.opacity)
+                        .onTapGesture {
+                            store.isSidebarPresented = false
+                        }
+
+                    CompactSidebarDrawer(width: drawerWidth)
+                        .offset(x: sidebarOffset(drawerWidth: drawerWidth))
+                        .simultaneousGesture(sidebarDragGesture(drawerWidth: drawerWidth))
+                        .transition(.move(edge: .leading).combined(with: .opacity))
+                        .zIndex(1)
+                }
+
+                if !store.isSidebarPresented {
+                    HStack {
+                        SidebarEdgeSwipeHandle(isPresented: $store.isSidebarPresented)
+                            .frame(width: 22)
+                        Spacer(minLength: 0)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .zIndex(2)
                 }
             }
-            .background(CodexTheme.appBackground)
+            .animation(.snappy(duration: 0.24), value: store.isSidebarPresented)
+        }
+    }
 
-            if store.isSidebarPresented {
-                Color.black.opacity(0.48)
-                    .ignoresSafeArea()
-                    .transition(.opacity)
-                    .onTapGesture {
+    private func sidebarProgress(drawerWidth: CGFloat) -> CGFloat {
+        if store.isSidebarPresented {
+            return max(0, min(1, 1 + sidebarDragTranslation / drawerWidth))
+        }
+        return max(0, min(1, sidebarDragTranslation / drawerWidth))
+    }
+
+    private func sidebarOffset(drawerWidth: CGFloat) -> CGFloat {
+        if store.isSidebarPresented {
+            return min(0, max(-drawerWidth, sidebarDragTranslation))
+        }
+        return min(0, -drawerWidth + sidebarDragTranslation)
+    }
+
+    private func sidebarDragGesture(drawerWidth: CGFloat) -> some Gesture {
+        DragGesture(minimumDistance: 12, coordinateSpace: .local)
+            .updating($sidebarDragTranslation) { value, state, _ in
+                if store.isSidebarPresented {
+                    state = min(0, max(-drawerWidth, value.translation.width))
+                } else if value.startLocation.x <= 28, value.translation.width > 0 {
+                    state = min(drawerWidth, value.translation.width)
+                }
+            }
+            .onEnded { value in
+                if store.isSidebarPresented {
+                    let shouldClose = value.translation.width < -drawerWidth * 0.24 ||
+                        value.predictedEndTranslation.width < -drawerWidth * 0.38
+                    if shouldClose {
                         store.isSidebarPresented = false
                     }
+                } else {
+                    let shouldOpen = value.startLocation.x <= 28 && (
+                        value.translation.width > drawerWidth * 0.24 ||
+                            value.predictedEndTranslation.width > drawerWidth * 0.44
+                    )
+                    if shouldOpen {
+                        store.isSidebarPresented = true
+                    }
+                }
+            }
+    }
+}
 
-                CompactSidebarDrawer()
-                    .transition(.move(edge: .leading).combined(with: .opacity))
-                    .zIndex(1)
+private struct SidebarEdgeSwipeHandle: UIViewRepresentable {
+    @Binding var isPresented: Bool
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(isPresented: $isPresented)
+    }
+
+    func makeUIView(context: Context) -> UIView {
+        let view = UIView()
+        view.backgroundColor = .clear
+        view.isUserInteractionEnabled = true
+        let recognizer = UIPanGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handlePan(_:)))
+        recognizer.maximumNumberOfTouches = 1
+        view.addGestureRecognizer(recognizer)
+        return view
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {
+        context.coordinator.isPresented = $isPresented
+    }
+
+    final class Coordinator: NSObject {
+        var isPresented: Binding<Bool>
+
+        init(isPresented: Binding<Bool>) {
+            self.isPresented = isPresented
+        }
+
+        @MainActor
+        @objc func handlePan(_ recognizer: UIPanGestureRecognizer) {
+            guard !isPresented.wrappedValue, let view = recognizer.view else { return }
+            let translation = recognizer.translation(in: view)
+            let velocity = recognizer.velocity(in: view)
+            if recognizer.state == .ended,
+               translation.x > 56 || velocity.x > 420
+            {
+                isPresented.wrappedValue = true
             }
         }
-        .animation(.snappy(duration: 0.24), value: store.isSidebarPresented)
     }
 }
 
@@ -132,15 +234,14 @@ struct CodexSidebar: View {
     }
 
     private var sidebarActions: some View {
-        VStack(alignment: .leading, spacing: 18) {
+        VStack(alignment: .leading, spacing: 12) {
             SidebarAction(icon: "square.and.pencil", title: "新对话") {
                 Task { await store.startNewThread() }
             }
-            SidebarAction(icon: "magnifyingglass", title: "搜索") {}
-            SidebarAction(icon: "circle.grid.2x2", title: "插件") {}
-            SidebarAction(icon: "clock.arrow.circlepath", title: "自动化") {}
+            .disabled(!store.canStartThread)
+            .opacity(store.canStartThread ? 1 : 0.45)
         }
-        .padding(.bottom, 34)
+        .padding(.bottom, 28)
     }
 
     private var projectHeader: some View {
@@ -149,9 +250,6 @@ struct CodexSidebar: View {
                 Text("项目")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(CodexTheme.tertiaryText)
-                Spacer()
-                Image(systemName: "line.3.horizontal.decrease")
-                Image(systemName: "folder.badge.plus")
             }
             .font(.caption)
             .foregroundStyle(CodexTheme.tertiaryText)
@@ -169,13 +267,15 @@ struct CodexSidebar: View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 4) {
                 ForEach(store.threads) { thread in
-                    SidebarThreadRow(
-                        thread: thread,
-                        isSelected: store.selectedThread?.id == thread.id
-                    )
-                    .onTapGesture {
+                    Button {
                         Task { await store.select(thread) }
+                    } label: {
+                        SidebarThreadRow(
+                            thread: thread,
+                            isSelected: store.selectedThread?.id == thread.id
+                        )
                     }
+                    .buttonStyle(.plain)
                 }
             }
         }
@@ -283,23 +383,25 @@ struct CompactThreadListView: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     .buttonStyle(CodexDarkButtonStyle())
+                    .disabled(!store.canStartThread)
+                    .opacity(store.canStartThread ? 1 : 0.45)
                     VStack(alignment: .leading, spacing: 6) {
                         Text("项目")
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(CodexTheme.tertiaryText)
                         ForEach(store.threads) { thread in
-                            SidebarThreadRow(
-                                thread: thread,
-                                isSelected: store.selectedThread?.id == thread.id
-                            )
-                            .onTapGesture {
+                            Button {
+                                store.isSidebarPresented = false
                                 Task {
                                     await store.select(thread)
-                                    await MainActor.run {
-                                        store.isSidebarPresented = false
-                                    }
                                 }
+                            } label: {
+                                SidebarThreadRow(
+                                    thread: thread,
+                                    isSelected: store.selectedThread?.id == thread.id
+                                )
                             }
+                            .buttonStyle(.plain)
                         }
                     }
                 }
@@ -337,11 +439,13 @@ struct CompactThreadListView: View {
 }
 
 struct CompactSidebarDrawer: View {
+    var width: CGFloat
+
     var body: some View {
         GeometryReader { proxy in
             let drawerHeight = max(0, proxy.size.height - proxy.safeAreaInsets.top - proxy.safeAreaInsets.bottom - 20)
             CompactThreadListView()
-                .frame(width: min(proxy.size.width * 0.86, 336), height: drawerHeight)
+                .frame(width: width, height: drawerHeight)
                 .clipShape(RoundedRectangle(cornerRadius: 18))
                 .padding(.leading, 10)
                 .padding(.top, proxy.safeAreaInsets.top + 10)
@@ -453,33 +557,68 @@ struct PairingView: View {
 
 struct CodexWorkspaceView: View {
     @EnvironmentObject private var store: CodexMobileStore
+    private let bottomAnchorID = "conversation-bottom-anchor"
 
     var body: some View {
         VStack(spacing: 0) {
             WorkspaceHeader()
-            ScrollView {
-                VStack(spacing: 22) {
-                    if store.selectedThread == nil {
-                        EmptyDarkWorkspace()
-                    } else {
-                        changeSummaryIfNeeded
-                        ForEach(store.conversation.items) { item in
-                            ConversationItemView(item: item)
+            ScrollViewReader { scrollProxy in
+                ScrollView {
+                    VStack(spacing: 22) {
+                        if store.selectedThread == nil {
+                            EmptyDarkWorkspace()
+                        } else {
+                            changeSummaryIfNeeded
+                            ForEach(store.conversation.items) { item in
+                                ConversationItemView(item: item)
+                            }
                         }
+                        Color.clear
+                            .frame(height: 1)
+                            .id(bottomAnchorID)
                     }
+                    .frame(maxWidth: 900)
+                    .padding(.horizontal, 24)
+                    .padding(.top, 26)
+                    .padding(.bottom, 170)
+                    .frame(maxWidth: .infinity)
                 }
-                .frame(maxWidth: 900)
-                .padding(.horizontal, 24)
-                .padding(.top, 26)
-                .padding(.bottom, 170)
-                .frame(maxWidth: .infinity)
+                .scrollDismissesKeyboard(.interactively)
+                .background(CodexTheme.appBackground)
+                .onAppear {
+                    scrollToBottom(scrollProxy, animated: false)
+                }
+                .onChange(of: store.selectedThread?.id) { _, _ in
+                    scrollToBottom(scrollProxy, animated: false)
+                }
+                .onChange(of: transcriptScrollKey) { _, _ in
+                    scrollToBottom(scrollProxy)
+                }
             }
-            .background(CodexTheme.appBackground)
             ComposerView()
         }
         .background(CodexTheme.appBackground)
         .navigationBarTitleDisplayMode(.inline)
         .toolbarColorScheme(.dark, for: .navigationBar)
+    }
+
+    private var transcriptScrollKey: String {
+        let items = store.conversation.items.map { item in
+            "\(item.id):\(item.body.count):\(item.status ?? "")"
+        }
+        return "\(store.conversation.threadID ?? "")|\(items.joined(separator: "|"))|\(store.conversation.activeApproval?.id.description ?? "")"
+    }
+
+    private func scrollToBottom(_ proxy: ScrollViewProxy, animated: Bool = true) {
+        DispatchQueue.main.async {
+            if animated {
+                withAnimation(.snappy(duration: 0.22)) {
+                    proxy.scrollTo(bottomAnchorID, anchor: .bottom)
+                }
+            } else {
+                proxy.scrollTo(bottomAnchorID, anchor: .bottom)
+            }
+        }
     }
 
     @ViewBuilder
@@ -519,17 +658,11 @@ struct WorkspaceHeader: View {
             } label: {
                 Image(systemName: "sidebar.left")
             }
-            Button {} label: {
-                Image(systemName: "chevron.right")
-            }
             Text(store.selectedThread?.displayTitle ?? "查看 Codex 项目")
                 .font(.headline.weight(.semibold))
                 .foregroundStyle(CodexTheme.text)
                 .lineLimit(1)
             Spacer(minLength: 8)
-            Button {} label: {
-                Image(systemName: "terminal")
-            }
             Button {
                 store.isSettingsPresented = true
             } label: {
@@ -540,12 +673,6 @@ struct WorkspaceHeader: View {
 
     private var regularHeader: some View {
         Group {
-            Button {} label: {
-                Image(systemName: "chevron.left")
-            }
-            Button {} label: {
-                Image(systemName: "chevron.right")
-            }
             Text(store.selectedThread?.displayTitle ?? "查看 Codex 项目")
                 .font(.headline.weight(.semibold))
                 .foregroundStyle(CodexTheme.text)
@@ -559,15 +686,6 @@ struct WorkspaceHeader: View {
                 Image(systemName: "ellipsis")
             }
             Spacer()
-            Button {} label: {
-                Image(systemName: "terminal")
-            }
-            Button {} label: {
-                Image(systemName: "folder")
-            }
-            Button {} label: {
-                Image(systemName: "sidebar.right")
-            }
         }
     }
 }
@@ -627,9 +745,6 @@ struct CodexChangeSummaryView: View {
                     Circle()
                         .fill(CodexTheme.blue)
                         .frame(width: 6, height: 6)
-                    Image(systemName: "chevron.down")
-                        .font(.caption.weight(.bold))
-                        .foregroundStyle(CodexTheme.secondaryText)
                 }
                 .font(.system(size: 15, weight: .semibold))
                 .padding(.horizontal, 14)
@@ -839,7 +954,7 @@ struct ConversationItemView: View {
     var body: some View {
         switch item.kind {
         case .user:
-            UserBubble(text: item.body)
+            UserBubble(text: item.body, status: item.status)
         case .fileChange:
             EmptyView()
         default:
@@ -850,6 +965,7 @@ struct ConversationItemView: View {
 
 struct UserBubble: View {
     var text: String
+    var status: String?
 
     var body: some View {
         HStack {
@@ -861,13 +977,11 @@ struct UserBubble: View {
                     .padding(.horizontal, 14)
                     .padding(.vertical, 12)
                     .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 14))
-                HStack(spacing: 12) {
-                    Text("19:31")
-                    Image(systemName: "doc.on.doc")
-                    Image(systemName: "pencil")
+                if status == "failed" {
+                    Label("发送失败，已恢复到输入框", systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(CodexTheme.orange)
                 }
-                .font(.caption)
-                .foregroundStyle(CodexTheme.tertiaryText)
             }
         }
     }
@@ -1044,54 +1158,134 @@ struct ComposerView: View {
 
     private var composerControls: some View {
         HStack(spacing: horizontalSizeClass == .compact ? 9 : 12) {
-            Button {} label: {
-                Image(systemName: "plus")
-            }
-            .buttonStyle(.plain)
             permissionBadge
+            modelBadge
             Spacer(minLength: 6)
             if store.conversation.isRunning {
                 ProgressView()
                     .controlSize(.small)
                     .tint(CodexTheme.secondaryText)
             }
-            Image(systemName: "bolt.fill")
-                .foregroundStyle(CodexTheme.secondaryText)
-            Text(horizontalSizeClass == .compact ? "5.5" : "5.5 超高")
-                .font(.callout.weight(.semibold))
-                .foregroundStyle(CodexTheme.text)
-            Image(systemName: "chevron.down")
-                .font(.caption)
-                .foregroundStyle(CodexTheme.secondaryText)
-            if horizontalSizeClass != .compact {
-                Image(systemName: "mic")
-                    .foregroundStyle(CodexTheme.secondaryText)
+            if store.conversation.isRunning {
+                Button {
+                    Task { await store.interrupt() }
+                } label: {
+                    Image(systemName: "stop.fill")
+                        .font(.headline.weight(.bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 38, height: 38)
+                        .background(CodexTheme.orange, in: Circle())
+                }
+                .buttonStyle(.plain)
+                .disabled(!store.canInterruptTurn)
+            } else {
+                Button {
+                    Task { await store.sendComposerText() }
+                } label: {
+                    Image(systemName: "arrow.up")
+                        .font(.headline.weight(.bold))
+                        .foregroundStyle(.black.opacity(store.canSendComposer ? 1 : 0.42))
+                        .frame(width: 38, height: 38)
+                        .background(sendButtonFill, in: Circle())
+                }
+                .buttonStyle(.plain)
+                .disabled(!store.canSendComposer)
             }
-            Button {
-                Task { await store.sendComposerText() }
-            } label: {
-                Image(systemName: "arrow.up")
-                    .font(.headline.weight(.bold))
-                    .foregroundStyle(.black)
-                    .frame(width: 38, height: 38)
-                    .background(CodexTheme.text, in: Circle())
-            }
-            .buttonStyle(.plain)
-            .disabled(store.composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         }
         .lineLimit(1)
     }
 
     private var permissionBadge: some View {
+        Menu {
+            Section("访问权限") {
+                ForEach(CodexPermissionPreset.allCases) { preset in
+                    Button {
+                        Task { await store.changePermissionPreset(to: preset) }
+                    } label: {
+                        if store.selectedPermissionPreset == preset {
+                            Label(preset.displayTitle, systemImage: "checkmark")
+                        } else {
+                            Text(preset.displayTitle)
+                        }
+                    }
+                }
+            }
+        } label: {
+            statusChip(
+                icon: "exclamationmark.shield",
+                title: horizontalSizeClass == .compact ? store.compactPermissionStatusTitle : store.permissionStatusTitle,
+                tint: CodexTheme.orange
+            )
+        }
+        .disabled(!store.canChangeSessionSettings)
+        .opacity(store.canChangeSessionSettings ? 1 : 0.62)
+    }
+
+    private var modelBadge: some View {
+        Menu {
+            Section("模型") {
+                ForEach(store.availableModels) { model in
+                    Button {
+                        Task { await store.changeModel(to: model) }
+                    } label: {
+                        if store.selectedModel.model == model.model {
+                            Label(model.displayName, systemImage: "checkmark")
+                        } else {
+                            Text(model.displayName)
+                        }
+                    }
+                }
+            }
+            Section("推理强度") {
+                ForEach(store.availableReasoningEfforts, id: \.self) { effort in
+                    Button {
+                        Task { await store.changeReasoningEffort(to: effort) }
+                    } label: {
+                        if store.selectedReasoningEffort == effort {
+                            Label(reasoningEffortTitle(effort), systemImage: "checkmark")
+                        } else {
+                            Text(reasoningEffortTitle(effort))
+                        }
+                    }
+                }
+            }
+        } label: {
+            statusChip(
+                icon: "bolt.fill",
+                title: horizontalSizeClass == .compact ? store.compactModelStatusTitle : store.modelStatusTitle,
+                tint: CodexTheme.secondaryText
+            )
+        }
+        .disabled(!store.canChangeSessionSettings)
+        .opacity(store.canChangeSessionSettings ? 1 : 0.62)
+    }
+
+    private var sendButtonFill: Color {
+        store.canSendComposer ? CodexTheme.text : CodexTheme.tertiaryText.opacity(0.55)
+    }
+
+    private func statusChip(icon: String, title: String, tint: Color) -> some View {
         HStack(spacing: 6) {
-            Image(systemName: "exclamationmark.shield")
-            Text(horizontalSizeClass == .compact ? "权限" : "完全访问权限")
-            Image(systemName: "chevron.down")
-                .font(.caption2.weight(.bold))
+            Image(systemName: icon)
+            Text(title)
         }
         .font(.callout.weight(.bold))
-        .foregroundStyle(CodexTheme.orange)
+        .foregroundStyle(tint)
         .lineLimit(1)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(CodexTheme.panel, in: Capsule())
+    }
+
+    private func reasoningEffortTitle(_ value: String) -> String {
+        switch value {
+        case "minimal": "极低"
+        case "low": "低"
+        case "medium": "中"
+        case "high": "高"
+        case "xhigh": "超高"
+        default: value
+        }
     }
 }
 

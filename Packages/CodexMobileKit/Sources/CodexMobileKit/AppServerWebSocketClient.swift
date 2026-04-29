@@ -90,14 +90,20 @@ public final class AppServerWebSocketClient {
     }
 
     @discardableResult
-    public func startThread(cwd: String) async throws -> JSONValue {
-        try await sendRequest(
-            method: "thread/start",
-            params: [
-                "cwd": .string(cwd),
-                "approvalsReviewer": "user",
-            ]
-        )
+    public func startThread(cwd: String, settings: CodexSessionSettings) async throws -> JSONValue {
+        var params: [String: JSONValue] = [
+            "cwd": .string(cwd),
+            "approvalsReviewer": "user",
+            "approvalPolicy": settings.permissionPreset.approvalPolicy,
+            "sandbox": settings.permissionPreset.sandboxMode,
+        ]
+        if let model = settings.model {
+            params["model"] = .string(model)
+        }
+        if let reasoningEffort = settings.reasoningEffort {
+            params["config"] = ["model_reasoning_effort": .string(reasoningEffort)]
+        }
+        return try await sendRequest(method: "thread/start", params: .object(params))
     }
 
     @discardableResult
@@ -106,21 +112,27 @@ public final class AppServerWebSocketClient {
     }
 
     @discardableResult
-    public func startTurn(threadID: String, text: String) async throws -> JSONValue {
-        try await sendRequest(
-            method: "turn/start",
-            params: [
-                "threadId": .string(threadID),
-                "input": [
-                    [
-                        "type": "text",
-                        "text": .string(text),
-                        "text_elements": [],
-                    ],
+    public func startTurn(threadID: String, text: String, cwd: String, settings: CodexSessionSettings) async throws -> JSONValue {
+        var params: [String: JSONValue] = [
+            "threadId": .string(threadID),
+            "input": [
+                [
+                    "type": "text",
+                    "text": .string(text),
+                    "text_elements": [],
                 ],
-                "approvalsReviewer": "user",
-            ]
-        )
+            ],
+            "approvalsReviewer": "user",
+            "approvalPolicy": settings.permissionPreset.approvalPolicy,
+            "sandboxPolicy": settings.permissionPreset.turnSandboxPolicy(cwd: cwd),
+        ]
+        if let model = settings.model {
+            params["model"] = .string(model)
+        }
+        if let reasoningEffort = settings.reasoningEffort {
+            params["effort"] = .string(reasoningEffort)
+        }
+        return try await sendRequest(method: "turn/start", params: .object(params))
     }
 
     @discardableResult
@@ -130,6 +142,48 @@ public final class AppServerWebSocketClient {
 
     public func respondToServerRequest(id: JSONRPCID, result: JSONValue) async throws {
         try await send(message: .response(id: id, result: result))
+    }
+
+    @discardableResult
+    public func readConfig(cwd: String?) async throws -> JSONValue {
+        var params: [String: JSONValue] = ["includeLayers": true]
+        if let cwd {
+            params["cwd"] = .string(cwd)
+        }
+        return try await sendRequest(method: "config/read", params: .object(params))
+    }
+
+    @discardableResult
+    public func listModels(limit: Int = 80, includeHidden: Bool = false) async throws -> JSONValue {
+        try await sendRequest(
+            method: "model/list",
+            params: [
+                "limit": .number(Double(limit)),
+                "includeHidden": .bool(includeHidden),
+            ]
+        )
+    }
+
+    @discardableResult
+    public func writeConfigValue(keyPath: String, value: JSONValue) async throws -> JSONValue {
+        try await writeConfigValues([(keyPath, value)])
+    }
+
+    @discardableResult
+    public func writeConfigValues(_ edits: [(String, JSONValue)]) async throws -> JSONValue {
+        try await sendRequest(
+            method: "config/batchWrite",
+            params: [
+                "edits": .array(edits.map { edit in
+                    [
+                        "keyPath": .string(edit.0),
+                        "value": edit.1,
+                        "mergeStrategy": "replace",
+                    ]
+                }),
+                "reloadUserConfig": true,
+            ]
+        )
     }
 
     @discardableResult

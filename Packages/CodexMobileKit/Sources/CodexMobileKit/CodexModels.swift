@@ -169,6 +169,29 @@ public struct ConversationState: Equatable, Sendable {
 }
 
 public enum ConversationReducer {
+    public static func state(fromThreadResponse value: JSONValue, fallbackThreadID: String? = nil) -> ConversationState {
+        let thread = value.objectValue?["thread"]?.objectValue ?? value.objectValue ?? [:]
+        let threadID = thread["id"]?.stringValue ?? fallbackThreadID
+        var state = ConversationState(threadID: threadID)
+        let turns = thread["turns"]?.arrayValue ?? []
+        for turn in turns {
+            guard let turnObject = turn.objectValue else { continue }
+            if turnObject["status"]?.stringValue == "inProgress" {
+                state.isRunning = true
+            }
+            for itemValue in turnObject["items"]?.arrayValue ?? [] {
+                if let item = parseItem(itemValue) {
+                    upsert(&state, item: item)
+                }
+            }
+            if let errorMessage = turnObject["error"]?.objectValue?["message"]?.stringValue {
+                state.lastError = errorMessage
+                upsert(&state, item: ConversationItem(id: "turn-error-\(turnObject["id"]?.stringValue ?? UUID().uuidString)", kind: .error, title: "Error", body: errorMessage))
+            }
+        }
+        return state
+    }
+
     public static func reduce(_ state: inout ConversationState, event: AppServerEvent) {
         switch event {
         case let .serverRequest(id, method, params):
@@ -219,7 +242,7 @@ public enum ConversationReducer {
             appendDelta(&state, object: object, kind: .reasoning, title: "Reasoning", deltaKey: "delta")
         case "item/commandExecution/outputDelta":
             appendDelta(&state, object: object, kind: .command, title: "Command output", deltaKey: "delta")
-        case "item/fileChange/patch/updated":
+        case "item/fileChange/patch/updated", "item/fileChange/patchUpdated":
             let id = object["itemId"]?.stringValue ?? UUID().uuidString
             upsert(&state, item: ConversationItem(id: id, kind: .fileChange, title: "File changes", body: "Patch updated", status: "updated"))
         case "error":

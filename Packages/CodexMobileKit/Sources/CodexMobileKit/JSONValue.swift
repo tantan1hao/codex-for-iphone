@@ -48,6 +48,11 @@ public enum JSONValue: Codable, Equatable, Sendable {
         return value
     }
 
+    public var boolValue: Bool? {
+        guard case let .bool(value) = self else { return nil }
+        return value
+    }
+
     public var objectValue: [String: JSONValue]? {
         guard case let .object(value) = self else { return nil }
         return value

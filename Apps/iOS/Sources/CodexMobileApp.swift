@@ -75,11 +75,18 @@ final class CodexMobileStore: ObservableObject {
     @Published var isScannerPresented = false
     @Published var isSidebarPresented = false
     @Published var isSettingsPresented = false
+    @Published private(set) var isSendingComposer = false
+    @Published private(set) var isUpdatingSessionSettings = false
+    @Published var availableModels: [CodexModelOption] = [.fallback]
+    @Published var selectedModelID = CodexModelOption.fallback.model
+    @Published var selectedReasoningEffort = "xhigh"
+    @Published var selectedPermissionPreset: CodexPermissionPreset = .workspaceWrite
 
     private let credentialStore = PairingCredentialStore()
     private var client = AppServerWebSocketClient()
     private var eventTask: Task<Void, Never>?
     private var didAttemptRestore = false
+    private var isDesignPreviewMode = false
 
     var appVersion: String {
         Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.1.0"
@@ -87,6 +94,56 @@ final class CodexMobileStore: ObservableObject {
 
     var canReconnect: Bool {
         pairing != nil && connectionState != .connecting && connectionState != .running
+    }
+
+    var canSendComposer: Bool {
+        isConnected &&
+            !conversation.isRunning &&
+            !isSendingComposer &&
+            !composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var canInterruptTurn: Bool {
+        isConnected && conversation.isRunning && selectedThread != nil
+    }
+
+    var canStartThread: Bool {
+        isConnected && !conversation.isRunning && !isSendingComposer
+    }
+
+    var canChangeSessionSettings: Bool {
+        isConnected && !conversation.isRunning && !isSendingComposer && !isUpdatingSessionSettings
+    }
+
+    var selectedModel: CodexModelOption {
+        availableModels.first { $0.model == selectedModelID || $0.id == selectedModelID } ?? CodexModelOption(
+            id: selectedModelID,
+            model: selectedModelID,
+            displayName: selectedModelID,
+            defaultReasoningEffort: selectedReasoningEffort,
+            supportedReasoningEfforts: ["medium", "high", "xhigh"]
+        )
+    }
+
+    var availableReasoningEfforts: [String] {
+        let efforts = selectedModel.supportedReasoningEfforts
+        return efforts.isEmpty ? ["medium", "high", "xhigh"] : efforts
+    }
+
+    var modelStatusTitle: String {
+        "\(shortModelName(selectedModel.displayName)) \(reasoningEffortTitle(selectedReasoningEffort))"
+    }
+
+    var compactModelStatusTitle: String {
+        shortModelName(selectedModel.displayName)
+    }
+
+    var permissionStatusTitle: String {
+        selectedPermissionPreset.displayTitle
+    }
+
+    var compactPermissionStatusTitle: String {
+        selectedPermissionPreset.compactTitle
     }
 
     var isConnected: Bool {
@@ -125,6 +182,7 @@ final class CodexMobileStore: ObservableObject {
     }
 
     func connect(_ payload: PairingPayload, persist: Bool = true) async throws {
+        isDesignPreviewMode = false
         connectionState = .connecting
         pairing = payload
         pairingText = payload.deepLinkURL.absoluteString
@@ -138,6 +196,7 @@ final class CodexMobileStore: ObservableObject {
         do {
             try await client.connect(to: payload, appVersion: appVersion)
             connectionState = .connected
+            await refreshSessionConfiguration(cwd: payload.cwd)
             try await loadThreads()
         } catch {
             connectionState = classifyConnectionError(error)
@@ -160,10 +219,12 @@ final class CodexMobileStore: ObservableObject {
     }
 
     func disconnect() {
+        isDesignPreviewMode = false
         eventTask?.cancel()
         client.disconnect()
         selectedThread = nil
         conversation = ConversationState()
+        isSendingComposer = false
         isSettingsPresented = false
         isSidebarPresented = false
         connectionState = pairing == nil ? .unpaired : .disconnected("已手动断开。")
@@ -181,6 +242,7 @@ final class CodexMobileStore: ObservableObject {
     }
 
     func loadDesignPreview() {
+        isDesignPreviewMode = true
         eventTask?.cancel()
         client.disconnect()
         let preview = CodexMobileStore.preview()
@@ -191,9 +253,14 @@ final class CodexMobileStore: ObservableObject {
         selectedThread = preview.selectedThread
         conversation = preview.conversation
         composerText = preview.composerText
+        isSendingComposer = false
         isScannerPresented = false
         isSidebarPresented = false
         isSettingsPresented = false
+        availableModels = preview.availableModels
+        selectedModelID = preview.selectedModelID
+        selectedReasoningEffort = preview.selectedReasoningEffort
+        selectedPermissionPreset = preview.selectedPermissionPreset
     }
 
     func loadThreads() async throws {
@@ -203,8 +270,22 @@ final class CodexMobileStore: ObservableObject {
 
     func startNewThread() async {
         guard let pairing else { return }
+        if isDesignPreviewMode {
+            let thread = CodexThread(
+                id: "preview-\(UUID().uuidString)",
+                name: "新对话",
+                preview: "新对话",
+                cwd: pairing.cwd,
+                status: "loaded",
+                updatedAt: .now
+            )
+            selectedThread = thread
+            threads.insert(thread, at: 0)
+            conversation = ConversationState(threadID: thread.id)
+            return
+        }
         do {
-            let value = try await client.startThread(cwd: pairing.cwd)
+            let value = try await client.startThread(cwd: pairing.cwd, settings: currentSessionSettings)
             guard let thread = CodexThread.parseStartOrResumeResponse(value) else { return }
             selectedThread = thread
             if !threads.contains(where: { $0.id == thread.id }) {
@@ -217,10 +298,13 @@ final class CodexMobileStore: ObservableObject {
     }
 
     func select(_ thread: CodexThread) async {
+        selectedThread = thread
+        conversation = ConversationState(threadID: thread.id)
+        guard isConnected, !isDesignPreviewMode else { return }
         do {
             let value = try await client.resumeThread(id: thread.id)
             selectedThread = CodexThread.parseStartOrResumeResponse(value) ?? thread
-            conversation = ConversationState(threadID: thread.id)
+            conversation = ConversationReducer.state(fromThreadResponse: value, fallbackThreadID: thread.id)
         } catch {
             connectionState = .disconnected(error.localizedDescription)
         }
@@ -228,23 +312,107 @@ final class CodexMobileStore: ObservableObject {
 
     func sendComposerText() async {
         let text = composerText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
+        guard canSendComposer else { return }
+        isSendingComposer = true
+        defer { isSendingComposer = false }
         if selectedThread == nil {
             await startNewThread()
         }
         guard let threadID = selectedThread?.id else { return }
         composerText = ""
-        conversation.items.append(.init(id: UUID().uuidString, kind: .user, title: "You", body: text))
+        let userItem = ConversationItem(id: UUID().uuidString, kind: .user, title: "You", body: text)
+        var updatedConversation = conversation
+        updatedConversation.items.append(userItem)
+        conversation = updatedConversation
+        if isDesignPreviewMode {
+            updatedConversation = conversation
+            updatedConversation.items.append(
+                ConversationItem(
+                    id: UUID().uuidString,
+                    kind: .assistant,
+                    title: "Codex",
+                    body: "预览模式已收到消息。真实连接后会通过 Codex app-server 返回流式回复。"
+                )
+            )
+            conversation = updatedConversation
+            return
+        }
         do {
             connectionState = .running
-            _ = try await client.startTurn(threadID: threadID, text: text)
+            let cwd = selectedThread?.cwd.isEmpty == false ? selectedThread?.cwd ?? "" : pairing?.cwd ?? ""
+            _ = try await client.startTurn(threadID: threadID, text: text, cwd: cwd, settings: currentSessionSettings)
         } catch {
+            updatedConversation = conversation
+            if let index = updatedConversation.items.firstIndex(where: { $0.id == userItem.id }) {
+                updatedConversation.items[index].status = "failed"
+            }
+            if composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                composerText = text
+            }
+            updatedConversation.items.append(
+                ConversationItem(
+                    id: UUID().uuidString,
+                    kind: .error,
+                    title: "发送失败",
+                    body: error.localizedDescription
+                )
+            )
+            conversation = updatedConversation
             connectionState = .disconnected(error.localizedDescription)
         }
     }
 
+    func changeModel(to model: CodexModelOption) async {
+        guard canChangeSessionSettings else { return }
+        let previous = selectedModelID
+        let previousEffort = selectedReasoningEffort
+        selectedModelID = model.model
+        if !model.supportedReasoningEfforts.isEmpty,
+           !model.supportedReasoningEfforts.contains(selectedReasoningEffort)
+        {
+            selectedReasoningEffort = model.defaultReasoningEffort ?? model.supportedReasoningEfforts.first ?? selectedReasoningEffort
+        }
+        await writeSessionSettings(
+            edits: [
+                ("model", .string(model.model)),
+                ("model_reasoning_effort", .string(selectedReasoningEffort)),
+            ],
+            rollback: {
+                self.selectedModelID = previous
+                self.selectedReasoningEffort = previousEffort
+            }
+        )
+    }
+
+    func changeReasoningEffort(to effort: String) async {
+        guard canChangeSessionSettings else { return }
+        let previous = selectedReasoningEffort
+        selectedReasoningEffort = effort
+        await writeSessionSettings(
+            edits: [("model_reasoning_effort", .string(effort))],
+            rollback: {
+                self.selectedReasoningEffort = previous
+            }
+        )
+    }
+
+    func changePermissionPreset(to preset: CodexPermissionPreset) async {
+        guard canChangeSessionSettings else { return }
+        let previous = selectedPermissionPreset
+        selectedPermissionPreset = preset
+        await writeSessionSettings(
+            edits: [
+                ("approval_policy", preset.approvalPolicy),
+                ("sandbox_mode", preset.sandboxMode),
+            ],
+            rollback: {
+                self.selectedPermissionPreset = previous
+            }
+        )
+    }
+
     func interrupt() async {
-        guard let threadID = selectedThread?.id else { return }
+        guard canInterruptTurn, let threadID = selectedThread?.id else { return }
         do {
             _ = try await client.interruptTurn(threadID: threadID)
         } catch {
@@ -256,7 +424,9 @@ final class CodexMobileStore: ObservableObject {
         guard let approval = conversation.activeApproval else { return }
         do {
             try await client.respondToServerRequest(id: approval.id, result: approval.response(decision: decision))
-            conversation.activeApproval = nil
+            var updatedConversation = conversation
+            updatedConversation.activeApproval = nil
+            conversation = updatedConversation
         } catch {
             connectionState = .disconnected(error.localizedDescription)
         }
@@ -266,10 +436,12 @@ final class CodexMobileStore: ObservableObject {
         eventTask?.cancel()
         eventTask = Task { @MainActor in
             for await event in client.events {
-                ConversationReducer.reduce(&conversation, event: event)
+                var updatedConversation = conversation
+                ConversationReducer.reduce(&updatedConversation, event: event)
+                conversation = updatedConversation
                 if case let .disconnected(message) = event {
                     connectionState = .disconnected(message)
-                } else if conversation.isRunning {
+                } else if updatedConversation.isRunning {
                     connectionState = .running
                 } else if case .running = connectionState {
                     connectionState = .connected
@@ -296,12 +468,98 @@ final class CodexMobileStore: ObservableObject {
         }
         return .disconnected(message)
     }
+
+    private var currentSessionSettings: CodexSessionSettings {
+        CodexSessionSettings(
+            model: selectedModelID,
+            reasoningEffort: selectedReasoningEffort,
+            permissionPreset: selectedPermissionPreset
+        )
+    }
+
+    private func refreshSessionConfiguration(cwd: String) async {
+        do {
+            let modelValue = try await client.listModels()
+            let models = CodexModelOption.parseListResponse(modelValue)
+            if !models.isEmpty {
+                availableModels = models.filter { !$0.displayName.isEmpty }
+            }
+        } catch {
+            availableModels = [.fallback]
+        }
+
+        do {
+            let configValue = try await client.readConfig(cwd: cwd)
+            let config = configValue.objectValue?["config"]?.objectValue ?? [:]
+            if let model = config["model"]?.stringValue, !model.isEmpty {
+                selectedModelID = model
+                if !availableModels.contains(where: { $0.model == model || $0.id == model }) {
+                    availableModels.insert(
+                        CodexModelOption(
+                            id: model,
+                            model: model,
+                            displayName: model,
+                            defaultReasoningEffort: config["model_reasoning_effort"]?.stringValue
+                        ),
+                        at: 0
+                    )
+                }
+            } else if let defaultModel = availableModels.first(where: \.isDefault) ?? availableModels.first {
+                selectedModelID = defaultModel.model
+            }
+            if let effort = config["model_reasoning_effort"]?.stringValue, !effort.isEmpty {
+                selectedReasoningEffort = effort
+            } else if let defaultEffort = selectedModel.defaultReasoningEffort {
+                selectedReasoningEffort = defaultEffort
+            }
+            selectedPermissionPreset = CodexPermissionPreset.fromConfig(
+                approvalPolicy: config["approval_policy"],
+                sandboxMode: config["sandbox_mode"]
+            )
+        } catch {
+            if let defaultModel = availableModels.first(where: \.isDefault) ?? availableModels.first {
+                selectedModelID = defaultModel.model
+                selectedReasoningEffort = defaultModel.defaultReasoningEffort ?? selectedReasoningEffort
+            }
+        }
+    }
+
+    private func writeSessionSettings(edits: [(String, JSONValue)], rollback: @escaping () -> Void) async {
+        guard !isDesignPreviewMode else { return }
+        isUpdatingSessionSettings = true
+        defer { isUpdatingSessionSettings = false }
+        do {
+            try await client.writeConfigValues(edits)
+        } catch {
+            rollback()
+            connectionState = .disconnected(error.localizedDescription)
+        }
+    }
+
+    private func shortModelName(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "GPT-", with: "")
+            .replacingOccurrences(of: "gpt-", with: "")
+            .replacingOccurrences(of: "Codex", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func reasoningEffortTitle(_ value: String) -> String {
+        switch value {
+        case "minimal": "极低"
+        case "low": "低"
+        case "medium": "中"
+        case "high": "高"
+        case "xhigh": "超高"
+        default: value
+        }
+    }
 }
 
 extension CodexMobileStore {
     static func preview() -> CodexMobileStore {
         let store = CodexMobileStore()
-        store.connectionState = .running
+        store.connectionState = .connected
         let payload = try? PairingPayload(
             name: "Mac",
             host: "192.168.1.22",
@@ -319,11 +577,32 @@ extension CodexMobileStore {
             CodexThread(id: "thr_5", name: "Say hi", preview: "Say hi", cwd: "/Users/mac", status: "notLoaded", updatedAt: .now.addingTimeInterval(-5 * 86_400)),
         ]
         store.selectedThread = store.threads.first
-        store.conversation = ConversationState(threadID: "thr_1")
-        store.conversation.items = [
+        var conversation = ConversationState(threadID: "thr_1")
+        conversation.items = [
             ConversationItem(id: "changes", kind: .fileChange, title: "Files changed", body: "", status: "completed"),
             ConversationItem(id: "u1", kind: .user, title: "You", body: "和codex app的显示页面呢"),
         ]
+        store.conversation = conversation
+        store.availableModels = [
+            CodexModelOption(
+                id: "gpt-5.5",
+                model: "gpt-5.5",
+                displayName: "GPT-5.5",
+                defaultReasoningEffort: "xhigh",
+                supportedReasoningEfforts: ["medium", "high", "xhigh"],
+                isDefault: true
+            ),
+            CodexModelOption(
+                id: "gpt-5.4",
+                model: "gpt-5.4",
+                displayName: "GPT-5.4",
+                defaultReasoningEffort: "high",
+                supportedReasoningEfforts: ["medium", "high", "xhigh"]
+            ),
+        ]
+        store.selectedModelID = "gpt-5.5"
+        store.selectedReasoningEffort = "xhigh"
+        store.selectedPermissionPreset = .fullAccess
         return store
     }
 }

@@ -40,5 +40,57 @@ final class ConversationReducerTests: XCTestCase {
         XCTAssertEqual(state.items.first?.kind, .approval)
         XCTAssertEqual(state.items.first?.body, "xcodebuild test")
     }
-}
 
+    func testBuildsConversationFromResumeResponseTurns() {
+        let response: JSONValue = [
+            "thread": [
+                "id": "thr",
+                "turns": [
+                    [
+                        "id": "turn_1",
+                        "status": "completed",
+                        "items": [
+                            [
+                                "type": "userMessage",
+                                "id": "u1",
+                                "content": [
+                                    [
+                                        "type": "text",
+                                        "text": "帮我跑测试",
+                                    ],
+                                ],
+                            ],
+                            [
+                                "type": "agentMessage",
+                                "id": "a1",
+                                "text": "我来检查。",
+                            ],
+                            [
+                                "type": "commandExecution",
+                                "id": "cmd1",
+                                "command": "swift test",
+                                "aggregatedOutput": "Build complete",
+                                "status": "completed",
+                            ],
+                        ],
+                    ],
+                    [
+                        "id": "turn_2",
+                        "status": "inProgress",
+                        "items": [],
+                    ],
+                ],
+            ],
+        ]
+
+        let state = ConversationReducer.state(fromThreadResponse: response)
+
+        XCTAssertEqual(state.threadID, "thr")
+        XCTAssertTrue(state.isRunning)
+        XCTAssertEqual(state.items.map(\.kind), [.user, .assistant, .command])
+        XCTAssertEqual(state.items[0].body, "帮我跑测试")
+        XCTAssertEqual(state.items[1].body, "我来检查。")
+        XCTAssertEqual(state.items[2].title, "swift test")
+        XCTAssertEqual(state.items[2].body, "Build complete")
+    }
+}
