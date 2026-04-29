@@ -28,3 +28,8 @@ codex app-server --listen ws://0.0.0.0:<port> --ws-auth capability-token --ws-to
 
 The phone receives the LAN address, port, workspace path, and token via a `codex-mobile://pair` QR link. The phone does not log in to OpenAI; it uses the Mac's Codex app-server session.
 
+## Connection Flow
+
+- The iOS app stores the last valid pairing link in Keychain and attempts one foreground reconnect on launch.
+- Before opening the WebSocket, the client checks `http://<host>:<port>/readyz` so “Codex not started” is shown before JSON-RPC initialization.
+- Settings and connection status cards expose reconnect, disconnect, and unpair actions.

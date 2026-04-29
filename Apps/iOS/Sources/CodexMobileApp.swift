@@ -13,6 +13,9 @@ struct CodexMobileApp: App {
                     store.pairingText = url.absoluteString
                     Task { await store.connectFromText() }
                 }
+                .task {
+                    await store.restoreAndConnectIfNeeded()
+                }
         }
     }
 }
@@ -73,25 +76,63 @@ final class CodexMobileStore: ObservableObject {
     @Published var isSidebarPresented = false
     @Published var isSettingsPresented = false
 
+    private let credentialStore = PairingCredentialStore()
     private var client = AppServerWebSocketClient()
     private var eventTask: Task<Void, Never>?
+    private var didAttemptRestore = false
 
     var appVersion: String {
         Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.1.0"
     }
 
-    func connectFromText() async {
-        do {
-            let payload = try PairingPayload.parse(pairingText)
-            try await connect(payload)
-        } catch {
-            connectionState = .disconnected(error.localizedDescription)
+    var canReconnect: Bool {
+        pairing != nil && connectionState != .connecting && connectionState != .running
+    }
+
+    var isConnected: Bool {
+        switch connectionState {
+        case .connected, .running:
+            true
+        default:
+            false
         }
     }
 
-    func connect(_ payload: PairingPayload) async throws {
+    func restoreAndConnectIfNeeded() async {
+        guard !didAttemptRestore, pairing == nil else { return }
+        didAttemptRestore = true
+        do {
+            guard let savedPairing = try credentialStore.load() else { return }
+            pairing = savedPairing
+            pairingText = savedPairing.deepLinkURL.absoluteString
+            try await connect(savedPairing, persist: false)
+        } catch {
+            connectionState = classifyConnectionError(error)
+        }
+    }
+
+    func connectFromText() async {
+        let payload: PairingPayload
+        do {
+            payload = try PairingPayload.parse(pairingText)
+        } catch {
+            connectionState = .disconnected(error.localizedDescription)
+            return
+        }
+        do {
+            try await connect(payload)
+        } catch {}
+    }
+
+    func connect(_ payload: PairingPayload, persist: Bool = true) async throws {
         connectionState = .connecting
         pairing = payload
+        pairingText = payload.deepLinkURL.absoluteString
+        if persist {
+            try? credentialStore.save(payload)
+        }
+        eventTask?.cancel()
+        client.disconnect()
         client = AppServerWebSocketClient()
         observeEvents()
         do {
@@ -104,6 +145,20 @@ final class CodexMobileStore: ObservableObject {
         }
     }
 
+    func reconnect() async {
+        do {
+            if let pairing {
+                try await connect(pairing, persist: false)
+            } else if let savedPairing = try credentialStore.load() {
+                try await connect(savedPairing, persist: false)
+            } else {
+                connectionState = .unpaired
+            }
+        } catch {
+            connectionState = classifyConnectionError(error)
+        }
+    }
+
     func disconnect() {
         eventTask?.cancel()
         client.disconnect()
@@ -111,7 +166,18 @@ final class CodexMobileStore: ObservableObject {
         conversation = ConversationState()
         isSettingsPresented = false
         isSidebarPresented = false
-        connectionState = pairing == nil ? .unpaired : .disconnected("Disconnected")
+        connectionState = pairing == nil ? .unpaired : .disconnected("已手动断开。")
+    }
+
+    func forgetPairing() {
+        disconnect()
+        try? credentialStore.delete()
+        pairing = nil
+        pairingText = ""
+        threads = []
+        selectedThread = nil
+        conversation = ConversationState()
+        connectionState = .unpaired
     }
 
     func loadDesignPreview() {
@@ -201,7 +267,9 @@ final class CodexMobileStore: ObservableObject {
         eventTask = Task { @MainActor in
             for await event in client.events {
                 ConversationReducer.reduce(&conversation, event: event)
-                if conversation.isRunning {
+                if case let .disconnected(message) = event {
+                    connectionState = .disconnected(message)
+                } else if conversation.isRunning {
                     connectionState = .running
                 } else if case .running = connectionState {
                     connectionState = .connected
@@ -218,9 +286,13 @@ final class CodexMobileStore: ObservableObject {
             return .tokenRejected
         }
         if message.localizedCaseInsensitiveContains("connection refused") ||
-            message.localizedCaseInsensitiveContains("could not connect")
+            message.localizedCaseInsensitiveContains("could not connect") ||
+            message.localizedCaseInsensitiveContains("couldn’t connect") ||
+            message.localizedCaseInsensitiveContains("timed out") ||
+            message.localizedCaseInsensitiveContains("readiness check") ||
+            message.localizedCaseInsensitiveContains("offline")
         {
-            return .codexUnavailable("The Mac helper or Codex app-server is not reachable.")
+            return .codexUnavailable("无法连接 Mac Helper 或 Codex app-server。请确认 Mac 端已启动并且手机在同一局域网或 VPN。")
         }
         return .disconnected(message)
     }

@@ -15,6 +15,7 @@ final class PairingPayloadTests: XCTestCase {
 
         XCTAssertEqual(parsed, payload)
         XCTAssertEqual(parsed.websocketURL.absoluteString, "ws://192.168.1.20:49320")
+        XCTAssertEqual(parsed.readyzURL.absoluteString, "http://192.168.1.20:49320/readyz")
     }
 
     func testRejectsInvalidTokenAndRelativeCwd() {
@@ -22,4 +23,3 @@ final class PairingPayloadTests: XCTestCase {
         XCTAssertThrowsError(try PairingPayload(name: "Mac", host: "192.168.1.20", port: 49320, token: "abcdefghijklmnopqrstuvwxyzabcdef0123456789", cwd: "tmp"))
     }
 }
-

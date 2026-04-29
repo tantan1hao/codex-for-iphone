@@ -30,7 +30,12 @@ public final class AppServerWebSocketClient {
         self.task = socket
         socket.resume()
         startReceiveLoop()
-        try await initialize(appVersion: appVersion)
+        do {
+            try await initialize(appVersion: appVersion)
+        } catch {
+            disconnect(emitEvent: false)
+            throw error
+        }
     }
 
     public func checkReady(to pairing: PairingPayload) async throws {
@@ -45,14 +50,16 @@ public final class AppServerWebSocketClient {
         }
     }
 
-    public func disconnect() {
+    public func disconnect(emitEvent: Bool = true) {
         task?.cancel(with: .goingAway, reason: nil)
         task = nil
         for (_, continuation) in pendingRequests {
             continuation.resume(throwing: AppServerClientError.notConnected)
         }
         pendingRequests.removeAll()
-        eventContinuation.yield(.disconnected("Disconnected"))
+        if emitEvent {
+            eventContinuation.yield(.disconnected("Disconnected"))
+        }
     }
 
     public func initialize(appVersion: String) async throws {
@@ -166,6 +173,9 @@ public final class AppServerWebSocketClient {
                 } catch {
                     self.eventContinuation.yield(.disconnected(error.localizedDescription))
                     self.failPendingRequests(error)
+                    if self.task === task {
+                        self.task = nil
+                    }
                     return
                 }
             }

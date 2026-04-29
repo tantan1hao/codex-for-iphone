@@ -675,6 +675,7 @@ struct ConnectionStatusCard: View {
                     .font(.caption.monospaced())
                     .foregroundStyle(CodexTheme.tertiaryText)
                     .lineLimit(2)
+                connectionActions
             } else {
                 Button {
                     store.isScannerPresented = true
@@ -686,6 +687,26 @@ struct ConnectionStatusCard: View {
         }
         .padding(12)
         .background(CodexTheme.panelRaised, in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    private var connectionActions: some View {
+        HStack(spacing: 8) {
+            Button {
+                Task { await store.reconnect() }
+            } label: {
+                Label("重连", systemImage: "arrow.clockwise")
+            }
+            .buttonStyle(CodexDarkButtonStyle())
+            .disabled(!store.canReconnect)
+
+            Button {
+                store.disconnect()
+            } label: {
+                Label("断开", systemImage: "power")
+            }
+            .buttonStyle(CodexDarkButtonStyle())
+            .disabled(!store.isConnected)
+        }
     }
 }
 
@@ -763,22 +784,43 @@ struct SettingsView: View {
     }
 
     private var settingsActions: some View {
-        HStack {
-            Button {
-                store.disconnect()
-                dismiss()
-            } label: {
-                Label("断开连接", systemImage: "power")
+        VStack(spacing: 10) {
+            HStack {
+                Button {
+                    Task { await store.reconnect() }
+                } label: {
+                    Label("重连", systemImage: "arrow.clockwise")
+                }
+                .buttonStyle(CodexDarkButtonStyle())
+                .disabled(!store.canReconnect)
+
+                Button {
+                    store.disconnect()
+                } label: {
+                    Label("断开", systemImage: "power")
+                }
+                .buttonStyle(CodexDarkButtonStyle())
+                .disabled(!store.isConnected)
+                Spacer()
             }
-            .buttonStyle(CodexDarkButtonStyle())
-            .disabled(store.pairing == nil)
-            Spacer()
-            Button {
-                dismiss()
-            } label: {
-                Text("完成")
+
+            HStack {
+                Button(role: .destructive) {
+                    store.forgetPairing()
+                    dismiss()
+                } label: {
+                    Label("取消配对", systemImage: "trash")
+                }
+                .buttonStyle(CodexDarkButtonStyle())
+                .disabled(store.pairing == nil)
+                Spacer()
+                Button {
+                    dismiss()
+                } label: {
+                    Text("完成")
+                }
+                .buttonStyle(CodexPrimaryButtonStyle())
             }
-            .buttonStyle(CodexPrimaryButtonStyle())
         }
     }
 }
