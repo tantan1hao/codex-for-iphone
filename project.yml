@@ -1,0 +1,98 @@
+name: CodexMobile
+options:
+  bundleIdPrefix: dev.codexmobile
+  deploymentTarget:
+    iOS: "18.0"
+    macOS: "14.0"
+  xcodeVersion: "16.0"
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+
+packages:
+  CodexMobileKit:
+    path: Packages/CodexMobileKit
+
+schemes:
+  CodexMobile:
+    shared: true
+    build:
+      targets:
+        CodexMobile: all
+    run:
+      config: Debug
+  CodexMobileHelper:
+    shared: true
+    build:
+      targets:
+        CodexMobileHelper: all
+    run:
+      config: Debug
+
+targets:
+  CodexMobile:
+    type: application
+    platform: iOS
+    deploymentTarget: "18.0"
+    sources:
+      - path: Apps/iOS/Sources
+    dependencies:
+      - package: CodexMobileKit
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.codexmobile.app
+        PRODUCT_NAME: Codex Mobile
+        TARGETED_DEVICE_FAMILY: "1,2"
+        INFOPLIST_KEY_CFBundleDisplayName: Codex Mobile
+        CODE_SIGN_STYLE: Automatic
+    info:
+      path: Apps/iOS/Info.plist
+      properties:
+        CFBundleDisplayName: Codex Mobile
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        UILaunchScreen: {}
+        NSCameraUsageDescription: Codex Mobile uses the camera to scan pairing QR codes from your Mac.
+        NSLocalNetworkUsageDescription: Codex Mobile connects to your Mac on the local network.
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        CFBundleURLTypes:
+          - CFBundleURLName: Codex Mobile Pairing
+            CFBundleURLSchemes:
+              - codex-mobile
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+
+  CodexMobileHelper:
+    type: application
+    platform: macOS
+    deploymentTarget: "14.0"
+    sources:
+      - path: Apps/MacHelper/Sources
+    dependencies:
+      - package: CodexMobileKit
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.codexmobile.helper
+        PRODUCT_NAME: Codex Mobile Helper
+        CODE_SIGN_STYLE: Automatic
+    info:
+      path: Apps/MacHelper/Info.plist
+      properties:
+        CFBundleDisplayName: Codex Mobile Helper
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        LSUIElement: true
+        LSApplicationCategoryType: public.app-category.developer-tools

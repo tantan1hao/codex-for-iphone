@@ -1,0 +1,5 @@
+.DS_Store
+DerivedData/
+CodexMobile.xcodeproj/
+.build/
+xcuserdata/
