@@ -40,6 +40,7 @@ targets:
     deploymentTarget: "18.0"
     sources:
       - path: Apps/iOS/Sources
+      - path: Apps/iOS/Assets.xcassets
     dependencies:
       - package: CodexMobileKit
     settings:
@@ -48,6 +49,7 @@ targets:
         PRODUCT_NAME: Codex Mobile
         TARGETED_DEVICE_FAMILY: "1,2"
         INFOPLIST_KEY_CFBundleDisplayName: Codex Mobile
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         CODE_SIGN_STYLE: Automatic
     info:
       path: Apps/iOS/Info.plist
@@ -81,12 +83,14 @@ targets:
     deploymentTarget: "14.0"
     sources:
       - path: Apps/MacHelper/Sources
+      - path: Apps/MacHelper/Assets.xcassets
     dependencies:
       - package: CodexMobileKit
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.codexmobile.helper
         PRODUCT_NAME: Codex Mobile Helper
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         CODE_SIGN_STYLE: Automatic
     info:
       path: Apps/MacHelper/Info.plist
