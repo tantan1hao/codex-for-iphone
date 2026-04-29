@@ -120,7 +120,7 @@ final class CodexMobileStore: ObservableObject {
     private var eventTask: Task<Void, Never>?
     private var threadListRefreshTask: Task<Void, Never>?
     private var threadContentRefreshTask: Task<Void, Never>?
-    private var recentLocalTurnStarts: [String: Date] = [:]
+    private var syncLoopTask: Task<Void, Never>?
     private var didAttemptRestore = false
     private var isDesignPreviewMode = false
     private var oversizedHistoryThreadIDs = Set<String>()
@@ -256,13 +256,13 @@ final class CodexMobileStore: ObservableObject {
         isLoadingMoreHistory = false
         historyNextCursor = nil
         historyContentNotice = nil
-        recentLocalTurnStarts.removeAll()
         if persist {
             try? credentialStore.save(payload)
         }
         eventTask?.cancel()
         threadListRefreshTask?.cancel()
         threadContentRefreshTask?.cancel()
+        syncLoopTask?.cancel()
         client.disconnect()
         client = AppServerWebSocketClient()
         observeEvents()
@@ -271,6 +271,7 @@ final class CodexMobileStore: ObservableObject {
             connectionState = .connected
             await refreshSessionConfiguration(cwd: payload.cwd)
             try await loadThreads()
+            startSyncLoop()
         } catch {
             connectionState = classifyConnectionError(error)
             throw error
@@ -296,6 +297,7 @@ final class CodexMobileStore: ObservableObject {
         eventTask?.cancel()
         threadListRefreshTask?.cancel()
         threadContentRefreshTask?.cancel()
+        syncLoopTask?.cancel()
         client.disconnect()
         selectedThread = nil
         conversation = ConversationState()
@@ -306,7 +308,6 @@ final class CodexMobileStore: ObservableObject {
         isLoadingMoreHistory = false
         historyNextCursor = nil
         historyContentNotice = nil
-        recentLocalTurnStarts.removeAll()
         connectionState = pairing == nil ? .unpaired : .disconnected("已手动断开。")
     }
 
@@ -330,6 +331,7 @@ final class CodexMobileStore: ObservableObject {
         eventTask?.cancel()
         threadListRefreshTask?.cancel()
         threadContentRefreshTask?.cancel()
+        syncLoopTask?.cancel()
         client.disconnect()
         let preview = CodexMobileStore.preview()
         connectionState = .preview
@@ -344,7 +346,6 @@ final class CodexMobileStore: ObservableObject {
         isLoadingMoreHistory = false
         historyNextCursor = nil
         historyContentNotice = nil
-        recentLocalTurnStarts.removeAll()
         isScannerPresented = false
         isSidebarPresented = false
         isSettingsPresented = false
@@ -485,7 +486,6 @@ final class CodexMobileStore: ObservableObject {
         do {
             connectionState = .running
             let cwd = selectedThread?.cwd.isEmpty == false ? selectedThread?.cwd ?? "" : pairing?.cwd ?? ""
-            recentLocalTurnStarts[threadID] = Date()
             _ = try await client.startTurn(threadID: threadID, text: text, cwd: cwd, settings: currentSessionSettings)
             scheduleThreadListRefresh()
         } catch {
@@ -695,8 +695,7 @@ final class CodexMobileStore: ObservableObject {
                 thread.updatedAt = Date()
             }
             if threadID == selectedThread?.id,
-               object["status"]?.stringValue != "running",
-               !isRecentLocalTurn(threadID: threadID)
+               object["status"]?.stringValue != "running"
             {
                 scheduleSelectedThreadContentRefresh()
             }
@@ -728,9 +727,7 @@ final class CodexMobileStore: ObservableObject {
                     thread.status = "loaded"
                     thread.updatedAt = Date()
                 }
-                if threadID == selectedThread?.id,
-                   !isRecentLocalTurn(threadID: threadID)
-                {
+                if threadID == selectedThread?.id {
                     scheduleSelectedThreadContentRefresh()
                 }
             }
@@ -805,6 +802,23 @@ final class CodexMobileStore: ObservableObject {
         }
     }
 
+    private func startSyncLoop() {
+        syncLoopTask?.cancel()
+        syncLoopTask = Task { @MainActor in
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(for: .seconds(3))
+                    guard self.isConnected, !self.isDesignPreviewMode else { continue }
+                    try await self.loadThreads()
+                } catch is CancellationError {
+                    return
+                } catch {
+                    // Polling is a fallback path; transient failures should not tear down the connection.
+                }
+            }
+        }
+    }
+
     private func scheduleSelectedThreadContentRefresh(delay: Duration = .milliseconds(600)) {
         guard !isDesignPreviewMode else { return }
         threadContentRefreshTask?.cancel()
@@ -822,6 +836,7 @@ final class CodexMobileStore: ObservableObject {
     private func refreshSelectedThreadContent() async {
         guard isConnected,
               !isDesignPreviewMode,
+              !conversation.isRunning,
               !isLoadingHistoryContent,
               !isLoadingMoreHistory,
               let threadID = selectedThread?.id
@@ -870,7 +885,6 @@ final class CodexMobileStore: ObservableObject {
 
     private func selectedThreadNeedsContentRefresh(previous: CodexThread?, updated: CodexThread) -> Bool {
         guard previous?.id == updated.id else { return false }
-        guard !isRecentLocalTurn(threadID: updated.id) else { return false }
         guard let previousDate = previous?.updatedAt,
               let updatedDate = updated.updatedAt
         else { return false }
@@ -890,17 +904,6 @@ final class CodexMobileStore: ObservableObject {
 
     private func normalizedTranscriptText(_ value: String) -> String {
         value.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private func isRecentLocalTurn(threadID: String) -> Bool {
-        cleanupRecentLocalTurns()
-        guard let startedAt = recentLocalTurnStarts[threadID] else { return false }
-        return Date().timeIntervalSince(startedAt) < 20
-    }
-
-    private func cleanupRecentLocalTurns() {
-        let cutoff = Date().addingTimeInterval(-60)
-        recentLocalTurnStarts = recentLocalTurnStarts.filter { _, startedAt in startedAt > cutoff }
     }
 
     private func handleOversizedHistory(thread: CodexThread) async {
@@ -924,6 +927,7 @@ final class CodexMobileStore: ObservableObject {
         eventTask?.cancel()
         threadListRefreshTask?.cancel()
         threadContentRefreshTask?.cancel()
+        syncLoopTask?.cancel()
         client.disconnect(emitEvent: false)
         client = AppServerWebSocketClient()
         observeEvents()
@@ -933,6 +937,7 @@ final class CodexMobileStore: ObservableObject {
             pairingText = payload.deepLinkURL.absoluteString
             connectionState = .connected
             try? await loadThreads()
+            startSyncLoop()
             if let resumeThreadID, selectedThread?.id == resumeThreadID {
                 let value = try await client.resumeThread(id: resumeThreadID)
                 if selectedThread?.id == resumeThreadID,
