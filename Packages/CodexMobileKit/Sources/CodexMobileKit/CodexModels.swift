@@ -175,21 +175,22 @@ public enum ConversationReducer {
         var state = ConversationState(threadID: threadID)
         let turns = thread["turns"]?.arrayValue ?? []
         for turn in turns {
-            guard let turnObject = turn.objectValue else { continue }
-            if turnObject["status"]?.stringValue == "inProgress" {
-                state.isRunning = true
-            }
-            for itemValue in turnObject["items"]?.arrayValue ?? [] {
-                if let item = parseItem(itemValue) {
-                    upsert(&state, item: item)
-                }
-            }
-            if let errorMessage = turnObject["error"]?.objectValue?["message"]?.stringValue {
-                state.lastError = errorMessage
-                upsert(&state, item: ConversationItem(id: "turn-error-\(turnObject["id"]?.stringValue ?? UUID().uuidString)", kind: .error, title: "Error", body: errorMessage))
-            }
+            apply(turn, to: &state)
         }
         return state
+    }
+
+    public static func state(fromTurnsListResponse value: JSONValue, threadID: String) -> ConversationState {
+        var state = ConversationState(threadID: threadID)
+        let turns = value.objectValue?["data"]?.arrayValue ?? []
+        for turn in turns.reversed() {
+            apply(turn, to: &state)
+        }
+        return state
+    }
+
+    public static func nextCursor(fromTurnsListResponse value: JSONValue) -> String? {
+        value.objectValue?["nextCursor"]?.stringValue
     }
 
     public static func reduce(_ state: inout ConversationState, event: AppServerEvent) {
@@ -290,6 +291,30 @@ public enum ConversationReducer {
             return ConversationItem(id: id, kind: .tool, title: type, body: object["tool"]?.stringValue ?? "", status: object["status"]?.stringValue)
         default:
             return ConversationItem(id: id, kind: .tool, title: type)
+        }
+    }
+
+    private static func apply(_ turn: JSONValue, to state: inout ConversationState) {
+        guard let turnObject = turn.objectValue else { return }
+        if turnObject["status"]?.stringValue == "inProgress" {
+            state.isRunning = true
+        }
+        for itemValue in turnObject["items"]?.arrayValue ?? [] {
+            if let item = parseItem(itemValue) {
+                upsert(&state, item: item)
+            }
+        }
+        if let errorMessage = turnObject["error"]?.objectValue?["message"]?.stringValue {
+            state.lastError = errorMessage
+            upsert(
+                &state,
+                item: ConversationItem(
+                    id: "turn-error-\(turnObject["id"]?.stringValue ?? UUID().uuidString)",
+                    kind: .error,
+                    title: "Error",
+                    body: errorMessage
+                )
+            )
         }
     }
 

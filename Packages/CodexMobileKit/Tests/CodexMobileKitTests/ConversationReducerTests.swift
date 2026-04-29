@@ -93,4 +93,45 @@ final class ConversationReducerTests: XCTestCase {
         XCTAssertEqual(state.items[2].title, "swift test")
         XCTAssertEqual(state.items[2].body, "Build complete")
     }
+
+    func testBuildsConversationFromTurnsListResponseInChronologicalOrder() {
+        let response: JSONValue = [
+            "data": [
+                [
+                    "id": "turn_new",
+                    "status": "completed",
+                    "items": [
+                        [
+                            "type": "agentMessage",
+                            "id": "a_new",
+                            "text": "新的回复",
+                        ],
+                    ],
+                ],
+                [
+                    "id": "turn_old",
+                    "status": "completed",
+                    "items": [
+                        [
+                            "type": "userMessage",
+                            "id": "u_old",
+                            "content": [
+                                [
+                                    "type": "text",
+                                    "text": "旧问题",
+                                ],
+                            ],
+                        ],
+                    ],
+                ],
+            ],
+            "nextCursor": "older",
+        ]
+
+        let state = ConversationReducer.state(fromTurnsListResponse: response, threadID: "thr")
+
+        XCTAssertEqual(state.threadID, "thr")
+        XCTAssertEqual(state.items.map(\.id), ["u_old", "a_new"])
+        XCTAssertEqual(ConversationReducer.nextCursor(fromTurnsListResponse: response), "older")
+    }
 }

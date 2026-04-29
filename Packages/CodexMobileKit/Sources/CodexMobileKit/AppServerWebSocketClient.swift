@@ -138,7 +138,25 @@ public final class AppServerWebSocketClient {
 
     @discardableResult
     public func resumeThread(id threadID: String) async throws -> JSONValue {
-        try await sendRequest(method: "thread/resume", params: ["threadId": .string(threadID)])
+        try await sendRequest(method: "thread/resume", params: Self.resumeThreadParams(id: threadID))
+    }
+
+    @discardableResult
+    public func listThreadTurns(
+        threadID: String,
+        limit: Int = 20,
+        cursor: String? = nil,
+        sortDirection: String = "desc"
+    ) async throws -> JSONValue {
+        try await sendRequest(
+            method: "thread/turns/list",
+            params: Self.threadTurnsListParams(
+                threadID: threadID,
+                limit: limit,
+                cursor: cursor,
+                sortDirection: sortDirection
+            )
+        )
     }
 
     @discardableResult
@@ -311,5 +329,30 @@ public final class AppServerWebSocketClient {
             continuation.resume(throwing: error)
         }
         pendingRequests.removeAll()
+    }
+
+    nonisolated static func resumeThreadParams(id threadID: String) -> JSONValue {
+        [
+            "threadId": .string(threadID),
+            "excludeTurns": true,
+            "persistExtendedHistory": true,
+        ]
+    }
+
+    nonisolated static func threadTurnsListParams(
+        threadID: String,
+        limit: Int,
+        cursor: String?,
+        sortDirection: String
+    ) -> JSONValue {
+        var params: [String: JSONValue] = [
+            "threadId": .string(threadID),
+            "limit": .number(Double(limit)),
+            "sortDirection": .string(sortDirection),
+        ]
+        if let cursor {
+            params["cursor"] = .string(cursor)
+        }
+        return .object(params)
     }
 }

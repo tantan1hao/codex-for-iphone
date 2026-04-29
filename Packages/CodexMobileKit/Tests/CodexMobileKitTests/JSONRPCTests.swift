@@ -41,4 +41,26 @@ final class JSONRPCTests: XCTestCase {
         XCTAssertEqual(nestedNotification.threadID, "thr_2")
         XCTAssertEqual(request.threadID, "thr_3")
     }
+
+    func testBuildsSafeThreadResumeParams() {
+        let params = AppServerWebSocketClient.resumeThreadParams(id: "thr_1").objectValue
+
+        XCTAssertEqual(params?["threadId"]?.stringValue, "thr_1")
+        XCTAssertEqual(params?["excludeTurns"]?.boolValue, true)
+        XCTAssertEqual(params?["persistExtendedHistory"]?.boolValue, true)
+    }
+
+    func testBuildsThreadTurnsListParams() {
+        let params = AppServerWebSocketClient.threadTurnsListParams(
+            threadID: "thr_1",
+            limit: 20,
+            cursor: "cursor_1",
+            sortDirection: "desc"
+        ).objectValue
+
+        XCTAssertEqual(params?["threadId"]?.stringValue, "thr_1")
+        XCTAssertEqual(params?["limit"], .number(20))
+        XCTAssertEqual(params?["cursor"]?.stringValue, "cursor_1")
+        XCTAssertEqual(params?["sortDirection"]?.stringValue, "desc")
+    }
 }

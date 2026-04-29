@@ -67,6 +67,24 @@ enum MobileConnectionState: Equatable {
     }
 }
 
+struct HistoryContentNotice: Equatable {
+    var icon: String
+    var title: String
+    var detail: String
+
+    static let oversized = HistoryContentNotice(
+        icon: "exclamationmark.arrow.triangle.2.circlepath",
+        title: "历史内容过大",
+        detail: "已跳过旧消息并重新连接；后续消息会从这里显示。"
+    )
+
+    static let olderContentOversized = HistoryContentNotice(
+        icon: "exclamationmark.arrow.triangle.2.circlepath",
+        title: "更早历史过大",
+        detail: "已停止继续加载旧消息；当前会话可以继续发送和接收新消息。"
+    )
+}
+
 @MainActor
 final class CodexMobileStore: ObservableObject {
     @Published var connectionState: MobileConnectionState = .unpaired
@@ -81,16 +99,28 @@ final class CodexMobileStore: ObservableObject {
     @Published var isSettingsPresented = false
     @Published private(set) var isSendingComposer = false
     @Published private(set) var isUpdatingSessionSettings = false
+    @Published private(set) var isLoadingHistoryContent = false
+    @Published private(set) var isLoadingMoreHistory = false
+    @Published private(set) var historyNextCursor: String?
+    @Published private(set) var historyContentNotice: HistoryContentNotice?
+    @Published var shouldLoadHistoryContent = UserDefaults.standard.object(forKey: "CodexMobile.shouldLoadHistoryContent") as? Bool ?? true {
+        didSet {
+            UserDefaults.standard.set(shouldLoadHistoryContent, forKey: Self.historyContentPreferenceKey)
+        }
+    }
     @Published var availableModels: [CodexModelOption] = [.fallback]
     @Published var selectedModelID = CodexModelOption.fallback.model
     @Published var selectedReasoningEffort = "xhigh"
     @Published var selectedPermissionPreset: CodexPermissionPreset = .workspaceWrite
 
+    private static let historyContentPreferenceKey = "CodexMobile.shouldLoadHistoryContent"
+    private static let historyPageLimit = 1
     private let credentialStore = PairingCredentialStore()
     private var client = AppServerWebSocketClient()
     private var eventTask: Task<Void, Never>?
     private var didAttemptRestore = false
     private var isDesignPreviewMode = false
+    private var oversizedHistoryThreadIDs = Set<String>()
 
     var appVersion: String {
         Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.1.0"
@@ -121,6 +151,22 @@ final class CodexMobileStore: ObservableObject {
 
     var canChangeSessionSettings: Bool {
         isConnected && !conversation.isRunning && !isSendingComposer && !isUpdatingSessionSettings
+    }
+
+    var shouldShowHistoryDisabledNotice: Bool {
+        selectedThread != nil &&
+            !shouldLoadHistoryContent &&
+            conversation.items.isEmpty &&
+            !isLoadingHistoryContent
+    }
+
+    var canLoadMoreHistory: Bool {
+        shouldLoadHistoryContent &&
+            historyNextCursor != nil &&
+            historyContentNotice == nil &&
+            selectedThread != nil &&
+            !isLoadingHistoryContent &&
+            !isLoadingMoreHistory
     }
 
     var selectedModel: CodexModelOption {
@@ -198,6 +244,15 @@ final class CodexMobileStore: ObservableObject {
         connectionState = .connecting
         pairing = payload
         pairingText = payload.deepLinkURL.absoluteString
+        threads = []
+        selectedThread = nil
+        conversation = ConversationState()
+        composerText = ""
+        isSendingComposer = false
+        isLoadingHistoryContent = false
+        isLoadingMoreHistory = false
+        historyNextCursor = nil
+        historyContentNotice = nil
         if persist {
             try? credentialStore.save(payload)
         }
@@ -239,6 +294,10 @@ final class CodexMobileStore: ObservableObject {
         isSendingComposer = false
         isSettingsPresented = false
         isSidebarPresented = false
+        isLoadingHistoryContent = false
+        isLoadingMoreHistory = false
+        historyNextCursor = nil
+        historyContentNotice = nil
         connectionState = pairing == nil ? .unpaired : .disconnected("已手动断开。")
     }
 
@@ -250,6 +309,10 @@ final class CodexMobileStore: ObservableObject {
         threads = []
         selectedThread = nil
         conversation = ConversationState()
+        isLoadingHistoryContent = false
+        isLoadingMoreHistory = false
+        historyNextCursor = nil
+        historyContentNotice = nil
         connectionState = .unpaired
     }
 
@@ -266,6 +329,10 @@ final class CodexMobileStore: ObservableObject {
         conversation = preview.conversation
         composerText = preview.composerText
         isSendingComposer = false
+        isLoadingHistoryContent = false
+        isLoadingMoreHistory = false
+        historyNextCursor = nil
+        historyContentNotice = nil
         isScannerPresented = false
         isSidebarPresented = false
         isSettingsPresented = false
@@ -294,6 +361,7 @@ final class CodexMobileStore: ObservableObject {
             selectedThread = thread
             threads.insert(thread, at: 0)
             conversation = ConversationState(threadID: thread.id)
+            historyContentNotice = nil
             return
         }
         do {
@@ -304,6 +372,7 @@ final class CodexMobileStore: ObservableObject {
                 threads.insert(thread, at: 0)
             }
             conversation = ConversationState(threadID: thread.id)
+            historyContentNotice = nil
         } catch {
             connectionState = .disconnected(error.localizedDescription)
         }
@@ -312,17 +381,41 @@ final class CodexMobileStore: ObservableObject {
     func select(_ thread: CodexThread) async {
         selectedThread = thread
         conversation = ConversationState(threadID: thread.id)
+        historyNextCursor = nil
+        isLoadingHistoryContent = false
+        isLoadingMoreHistory = false
+        historyContentNotice = nil
         guard isConnected, !isDesignPreviewMode else { return }
         do {
             let value = try await client.resumeThread(id: thread.id)
             // Only apply if the user hasn't already switched away
             guard selectedThread?.id == thread.id else { return }
             selectedThread = CodexThread.parseStartOrResumeResponse(value) ?? thread
-            conversation = ConversationReducer.state(fromThreadResponse: value, fallbackThreadID: thread.id)
+            if shouldLoadHistoryContent {
+                if oversizedHistoryThreadIDs.contains(thread.id) {
+                    historyContentNotice = .oversized
+                    conversation = ConversationState(threadID: thread.id)
+                    return
+                }
+                isLoadingHistoryContent = true
+                let turnsValue = try await client.listThreadTurns(threadID: thread.id, limit: Self.historyPageLimit)
+                guard selectedThread?.id == thread.id, shouldLoadHistoryContent else { return }
+                conversation = ConversationReducer.state(fromTurnsListResponse: turnsValue, threadID: thread.id)
+                historyNextCursor = ConversationReducer.nextCursor(fromTurnsListResponse: turnsValue)
+                isLoadingHistoryContent = false
+            } else {
+                conversation = ConversationState(threadID: thread.id)
+            }
         } catch {
             // Don't tear down the whole connection just because one thread
             // failed to resume — keep the composer usable.
             guard selectedThread?.id == thread.id else { return }
+            isLoadingHistoryContent = false
+            historyNextCursor = nil
+            if isMessageTooLong(error) {
+                await handleOversizedHistory(thread: thread)
+                return
+            }
             var errorConversation = ConversationState(threadID: thread.id)
             errorConversation.items.append(
                 ConversationItem(
@@ -365,6 +458,64 @@ final class CodexMobileStore: ObservableObject {
             )
             conversation = updatedConversation
             connectionState = .disconnected(error.localizedDescription)
+        }
+    }
+
+    func loadMoreHistory() async {
+        guard shouldLoadHistoryContent,
+              !isLoadingMoreHistory,
+              let threadID = selectedThread?.id,
+              let cursor = historyNextCursor,
+              historyContentNotice == nil
+        else { return }
+        isLoadingMoreHistory = true
+        do {
+            let value = try await client.listThreadTurns(threadID: threadID, limit: Self.historyPageLimit, cursor: cursor)
+            guard selectedThread?.id == threadID, shouldLoadHistoryContent else { return }
+            let olderState = ConversationReducer.state(fromTurnsListResponse: value, threadID: threadID)
+            var updatedConversation = conversation
+            let existingIDs = Set(updatedConversation.items.map(\.id))
+            let olderItems = olderState.items.filter { !existingIDs.contains($0.id) }
+            updatedConversation.items.insert(contentsOf: olderItems, at: 0)
+            updatedConversation.isRunning = updatedConversation.isRunning || olderState.isRunning
+            updatedConversation.lastError = updatedConversation.lastError ?? olderState.lastError
+            conversation = updatedConversation
+            historyNextCursor = ConversationReducer.nextCursor(fromTurnsListResponse: value)
+            isLoadingMoreHistory = false
+        } catch {
+            guard selectedThread?.id == threadID else { return }
+            isLoadingMoreHistory = false
+            if isMessageTooLong(error) {
+                oversizedHistoryThreadIDs.insert(threadID)
+                historyContentNotice = .olderContentOversized
+                historyNextCursor = nil
+                await reconnectTransportPreservingSelection(resumeThreadID: threadID)
+                return
+            }
+            var updatedConversation = conversation
+            updatedConversation.items.insert(
+                ConversationItem(
+                    id: UUID().uuidString,
+                    kind: .error,
+                    title: "无法加载更早历史",
+                    body: error.localizedDescription
+                ),
+                at: 0
+            )
+            conversation = updatedConversation
+        }
+    }
+
+    func setShouldLoadHistoryContent(_ enabled: Bool) {
+        shouldLoadHistoryContent = enabled
+        guard let thread = selectedThread else { return }
+        if enabled, isConnected, !isDesignPreviewMode, conversation.items.isEmpty {
+            Task { await select(thread) }
+        } else if !enabled, !conversation.isRunning {
+            conversation = ConversationState(threadID: thread.id)
+            historyNextCursor = nil
+            isLoadingHistoryContent = false
+            isLoadingMoreHistory = false
         }
     }
 
@@ -440,8 +591,10 @@ final class CodexMobileStore: ObservableObject {
 
     private func observeEvents() {
         eventTask?.cancel()
+        let observedClient = client
         eventTask = Task { @MainActor in
-            for await event in client.events {
+            for await event in observedClient.events {
+                guard self.client === observedClient else { continue }
                 // Filter out events that belong to a different thread so
                 // a slow response from a previous thread can't corrupt
                 // the current conversation.
@@ -455,7 +608,12 @@ final class CodexMobileStore: ObservableObject {
                 ConversationReducer.reduce(&updatedConversation, event: event)
                 conversation = updatedConversation
                 if case let .disconnected(message) = event {
-                    connectionState = .disconnected(message)
+                    if (isLoadingHistoryContent || isLoadingMoreHistory),
+                       isMessageTooLongMessage(message)
+                    {
+                        continue
+                    }
+                    connectionState = classifyConnectionError(AppServerClientError.transport(message))
                 } else if updatedConversation.isRunning {
                     connectionState = .running
                 } else if case .running = connectionState {
@@ -465,12 +623,56 @@ final class CodexMobileStore: ObservableObject {
         }
     }
 
+    private func handleOversizedHistory(thread: CodexThread) async {
+        guard selectedThread?.id == thread.id else { return }
+        oversizedHistoryThreadIDs.insert(thread.id)
+        isLoadingHistoryContent = false
+        isLoadingMoreHistory = false
+        historyNextCursor = nil
+        historyContentNotice = .oversized
+        conversation = ConversationState(threadID: thread.id)
+        await reconnectTransportPreservingSelection(resumeThreadID: thread.id)
+    }
+
+    private func reconnectTransportPreservingSelection(resumeThreadID: String?) async {
+        guard let payload = pairing ?? (try? credentialStore.load()) else {
+            connectionState = .unpaired
+            return
+        }
+        isDesignPreviewMode = false
+        connectionState = .connecting
+        eventTask?.cancel()
+        client.disconnect(emitEvent: false)
+        client = AppServerWebSocketClient()
+        observeEvents()
+        do {
+            try await client.connect(to: payload, appVersion: appVersion)
+            pairing = payload
+            pairingText = payload.deepLinkURL.absoluteString
+            connectionState = .connected
+            try? await loadThreads()
+            if let resumeThreadID, selectedThread?.id == resumeThreadID {
+                let value = try await client.resumeThread(id: resumeThreadID)
+                if selectedThread?.id == resumeThreadID,
+                   let resumedThread = CodexThread.parseStartOrResumeResponse(value)
+                {
+                    selectedThread = resumedThread
+                }
+            }
+        } catch {
+            connectionState = classifyConnectionError(error)
+        }
+    }
+
     private func classifyConnectionError(_ error: Error) -> MobileConnectionState {
         let message = error.localizedDescription
         if message.localizedCaseInsensitiveContains("401") ||
             message.localizedCaseInsensitiveContains("unauthorized")
         {
             return .tokenRejected
+        }
+        if message.localizedCaseInsensitiveContains("message too long") {
+            return .disconnected("历史内容过大，WebSocket 已断开。请重连，或关闭“保留历史内容”后再打开该会话。")
         }
         if message.localizedCaseInsensitiveContains("connection refused") ||
             message.localizedCaseInsensitiveContains("could not connect") ||
@@ -482,6 +684,14 @@ final class CodexMobileStore: ObservableObject {
             return .codexUnavailable("无法连接 Mac Helper 或 Codex app-server。请确认 Mac 端已启动并且手机在同一局域网或 VPN。")
         }
         return .disconnected(message)
+    }
+
+    private func isMessageTooLong(_ error: Error) -> Bool {
+        isMessageTooLongMessage(error.localizedDescription)
+    }
+
+    private func isMessageTooLongMessage(_ message: String) -> Bool {
+        message.localizedCaseInsensitiveContains("message too long")
     }
 
     private var currentSessionSettings: CodexSessionSettings {

@@ -569,6 +569,7 @@ struct CodexWorkspaceView: View {
                             EmptyDarkWorkspace()
                         } else {
                             changeSummaryIfNeeded
+                            historyStatusIfNeeded
                             ForEach(store.conversation.items) { item in
                                 ConversationItemView(item: item)
                             }
@@ -630,6 +631,35 @@ struct CodexWorkspaceView: View {
             ApprovalCard(approval: approval)
         }
     }
+
+    @ViewBuilder
+    private var historyStatusIfNeeded: some View {
+        if store.isLoadingHistoryContent {
+            HistoryStatusCard(
+                icon: "clock.arrow.circlepath",
+                title: "正在加载最近历史",
+                detail: "正在按最小分页读取旧消息，避免大历史会话断开连接。",
+                isLoading: true
+            )
+        } else if let notice = store.historyContentNotice {
+            HistoryStatusCard(
+                icon: notice.icon,
+                title: notice.title,
+                detail: notice.detail,
+                isLoading: false
+            )
+        } else if store.shouldShowHistoryDisabledNotice {
+            HistoryStatusCard(
+                icon: "clock.badge.xmark",
+                title: "历史内容未加载",
+                detail: "后续消息会从这里显示。",
+                isLoading: false
+            )
+        }
+        if store.canLoadMoreHistory || store.isLoadingMoreHistory {
+            LoadMoreHistoryButton()
+        }
+    }
 }
 
 struct WorkspaceHeader: View {
@@ -657,6 +687,7 @@ struct WorkspaceHeader: View {
                 store.isSidebarPresented = true
             } label: {
                 Image(systemName: "sidebar.left")
+                    .frame(width: 34, height: 34)
             }
             Text(store.selectedThread?.displayTitle ?? "查看 Codex 项目")
                 .font(.headline.weight(.semibold))
@@ -670,6 +701,7 @@ struct WorkspaceHeader: View {
                 store.isSettingsPresented = true
             } label: {
                 Image(systemName: "ellipsis")
+                    .frame(width: 34, height: 34)
             }
         }
     }
@@ -690,6 +722,7 @@ struct WorkspaceHeader: View {
                 store.isSettingsPresented = true
             } label: {
                 Image(systemName: "ellipsis")
+                    .frame(width: 34, height: 34)
             }
             Spacer()
         }
@@ -840,6 +873,76 @@ struct ConnectionStatusCard: View {
     }
 }
 
+struct HistoryStatusCard: View {
+    var icon: String
+    var title: String
+    var detail: String
+    var isLoading: Bool
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            if isLoading {
+                ProgressView()
+                    .controlSize(.small)
+                    .tint(CodexTheme.secondaryText)
+                    .frame(width: 22, height: 22)
+            } else {
+                Image(systemName: icon)
+                    .foregroundStyle(CodexTheme.secondaryText)
+                    .frame(width: 22)
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.callout.weight(.semibold))
+                    .foregroundStyle(CodexTheme.text)
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(CodexTheme.secondaryText)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(CodexTheme.panel, in: RoundedRectangle(cornerRadius: 12))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(CodexTheme.separator, lineWidth: 1)
+        }
+    }
+}
+
+struct LoadMoreHistoryButton: View {
+    @EnvironmentObject private var store: CodexMobileStore
+
+    var body: some View {
+        Button {
+            Task { await store.loadMoreHistory() }
+        } label: {
+            HStack(spacing: 8) {
+                if store.isLoadingMoreHistory {
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(CodexTheme.secondaryText)
+                } else {
+                    Image(systemName: "arrow.up.to.line")
+                }
+                Text(store.isLoadingMoreHistory ? "加载中" : "加载更早内容")
+            }
+            .font(.callout.weight(.semibold))
+            .foregroundStyle(CodexTheme.secondaryText)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 10)
+        }
+        .buttonStyle(.plain)
+        .disabled(!store.canLoadMoreHistory)
+        .background(CodexTheme.panel.opacity(0.72), in: RoundedRectangle(cornerRadius: 12))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(CodexTheme.separator, lineWidth: 1)
+        }
+    }
+}
+
 struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var store: CodexMobileStore
@@ -851,6 +954,7 @@ struct SettingsView: View {
                 settingsHeader
                 ConnectionStatusCard()
                 settingsDetails
+                historyPreferences
                 Spacer(minLength: 8)
                 settingsActions
             }
@@ -883,6 +987,34 @@ struct SettingsView: View {
             Divider().overlay(CodexTheme.separator)
             settingsRow(icon: "folder", title: "工作区", value: store.pairing?.cwd ?? "-")
         }
+        .background(CodexTheme.panel, in: RoundedRectangle(cornerRadius: 12))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(CodexTheme.separator, lineWidth: 1)
+        }
+    }
+
+    private var historyPreferences: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Toggle(
+                isOn: Binding(
+                    get: { store.shouldLoadHistoryContent },
+                    set: { store.setShouldLoadHistoryContent($0) }
+                )
+            ) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("保留历史内容")
+                        .font(.callout.weight(.semibold))
+                        .foregroundStyle(CodexTheme.text)
+                    Text("关闭后仍显示会话列表，但打开旧会话时不加载旧消息。")
+                        .font(.caption)
+                        .foregroundStyle(CodexTheme.secondaryText)
+                }
+            }
+            .toggleStyle(.switch)
+            .tint(CodexTheme.blue)
+        }
+        .padding(14)
         .background(CodexTheme.panel, in: RoundedRectangle(cornerRadius: 12))
         .overlay {
             RoundedRectangle(cornerRadius: 12)
