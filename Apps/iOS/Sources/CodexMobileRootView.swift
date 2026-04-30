@@ -14,7 +14,6 @@ struct CodexMobileRootView: View {
                 RegularCodexRoot()
             }
         }
-        .preferredColorScheme(store.themePreference.colorScheme)
         .sheet(isPresented: $store.isScannerPresented) {
             QRScannerSheet { value in
                 store.pairingText = value

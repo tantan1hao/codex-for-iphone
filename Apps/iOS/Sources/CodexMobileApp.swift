@@ -1,6 +1,7 @@
 import CodexMobileKit
 import Foundation
 import SwiftUI
+import UIKit
 
 @main
 struct CodexMobileApp: App {
@@ -17,6 +18,26 @@ struct CodexMobileApp: App {
                 .task {
                     await store.restoreAndConnectIfNeeded()
                 }
+                .onAppear { applyThemeOverride(store.themePreference) }
+                .onChange(of: store.themePreference) { _, newValue in
+                    applyThemeOverride(newValue)
+                }
+        }
+    }
+}
+
+@MainActor
+private func applyThemeOverride(_ preference: ThemePreference) {
+    let style: UIUserInterfaceStyle
+    switch preference {
+    case .system: style = .unspecified
+    case .light: style = .light
+    case .dark: style = .dark
+    }
+    for scene in UIApplication.shared.connectedScenes {
+        guard let windowScene = scene as? UIWindowScene else { continue }
+        for window in windowScene.windows {
+            window.overrideUserInterfaceStyle = style
         }
     }
 }
