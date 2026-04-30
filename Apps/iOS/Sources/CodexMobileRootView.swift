@@ -284,7 +284,8 @@ private struct HeaderToolStrip: View {
             ForEach(WorkspacePane.headerToolPanes) { pane in
                 HeaderToolButton(
                     pane: pane,
-                    isSelected: isPaneSelected(pane)
+                    isSelected: isPaneSelected(pane),
+                    contextRemainingFraction: contextRemainingFraction(for: pane)
                 ) {
                     handleTap(pane)
                 }
@@ -335,24 +336,92 @@ private struct HeaderToolStrip: View {
             }
         )
     }
+
+    private func contextRemainingFraction(for pane: WorkspacePane) -> Double? {
+        guard pane == .context,
+              case let .loaded(snapshot) = store.contextUsageState
+        else { return nil }
+        return snapshot.resolvedRemainingFraction
+    }
 }
 
 private struct HeaderToolButton: View {
     var pane: WorkspacePane
     var isSelected: Bool
+    var contextRemainingFraction: Double?
     var action: () -> Void
 
     var body: some View {
         Button(action: action) {
-            Image(systemName: pane.symbolName)
-                .font(.callout.weight(.semibold))
+            toolIcon
                 .frame(width: 32, height: 34)
                 .background(isSelected ? CodexTheme.selected : Color.clear, in: RoundedRectangle(cornerRadius: 8))
         }
         .buttonStyle(.plain)
         .foregroundStyle(isSelected ? CodexTheme.text : CodexTheme.secondaryText)
         .accessibilityLabel(pane.title)
+        .accessibilityValue(accessibilityValue)
         .accessibilityAddTraits(isSelected ? .isSelected : [])
+    }
+
+    @ViewBuilder
+    private var toolIcon: some View {
+        if pane == .context {
+            ContextRemainingRing(
+                remainingFraction: contextRemainingFraction,
+                isSelected: isSelected
+            )
+            .frame(width: 18, height: 18)
+        } else {
+            Image(systemName: pane.symbolName)
+                .font(.callout.weight(.semibold))
+        }
+    }
+
+    private var accessibilityValue: String {
+        guard pane == .context,
+              let contextRemainingFraction
+        else { return "" }
+        return "剩余 \(Int((min(max(contextRemainingFraction, 0), 1) * 100).rounded()))%"
+    }
+}
+
+private struct ContextRemainingRing: View {
+    var remainingFraction: Double?
+    var isSelected: Bool
+
+    private var displayFraction: Double {
+        guard let remainingFraction else { return 0.18 }
+        return min(max(remainingFraction, 0), 1)
+    }
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .stroke(trackColor, lineWidth: 3)
+            Circle()
+                .trim(from: 0, to: displayFraction)
+                .stroke(
+                    progressColor,
+                    style: StrokeStyle(lineWidth: 3, lineCap: .round)
+                )
+                .rotationEffect(.degrees(-90))
+                .animation(.snappy(duration: 0.24), value: displayFraction)
+        }
+    }
+
+    private var trackColor: Color {
+        if isSelected {
+            return CodexTheme.secondaryText.opacity(0.28)
+        }
+        return CodexTheme.secondaryText.opacity(0.22)
+    }
+
+    private var progressColor: Color {
+        if remainingFraction == nil {
+            return CodexTheme.secondaryText
+        }
+        return isSelected ? CodexTheme.text : CodexTheme.secondaryText
     }
 }
 
