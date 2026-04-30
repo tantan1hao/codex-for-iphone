@@ -803,7 +803,6 @@ struct CompactThreadListView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
                     compactDrawerHeader
-                    ConnectionStatusCard()
                     Button {
                         store.activatePane(.chat)
                         Task {

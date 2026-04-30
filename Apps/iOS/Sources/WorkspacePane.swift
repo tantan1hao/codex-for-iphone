@@ -14,7 +14,7 @@ enum WorkspacePane: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .chat: "聊天"
+        case .chat: "搜索"
         case .automations: "自动化"
         case .terminal: "终端"
         case .files: "文件"
@@ -24,7 +24,7 @@ enum WorkspacePane: String, CaseIterable, Identifiable {
 
     var symbolName: String {
         switch self {
-        case .chat: "bubble.left.and.bubble.right"
+        case .chat: "magnifyingglass"
         case .automations: "clock.arrow.circlepath"
         case .terminal: "terminal"
         case .files: "folder"
