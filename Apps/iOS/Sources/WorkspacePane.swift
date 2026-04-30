@@ -9,12 +9,12 @@ enum WorkspacePane: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
-    static let sidebarPanes: [WorkspacePane] = [.chat, .automations]
+    static let sidebarPanes: [WorkspacePane] = [.automations]
     static let headerToolPanes: [WorkspacePane] = [.terminal, .files, .context]
 
     var title: String {
         switch self {
-        case .chat: "搜索"
+        case .chat: "聊天"
         case .automations: "自动化"
         case .terminal: "终端"
         case .files: "文件"
@@ -24,7 +24,7 @@ enum WorkspacePane: String, CaseIterable, Identifiable {
 
     var symbolName: String {
         switch self {
-        case .chat: "magnifyingglass"
+        case .chat: "bubble.left.and.bubble.right"
         case .automations: "clock.arrow.circlepath"
         case .terminal: "terminal"
         case .files: "folder"

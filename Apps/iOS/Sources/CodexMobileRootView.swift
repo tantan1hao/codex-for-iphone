@@ -587,11 +587,18 @@ private struct SidebarEdgeSwipeHandle: UIViewRepresentable {
 
 struct CodexSidebar: View {
     @EnvironmentObject private var store: CodexMobileStore
+    @State private var searchQuery = ""
+
+    private var filteredThreads: [CodexThread] {
+        ThreadSearch.filter(store.threads, query: searchQuery)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             sidebarTopChrome
             sidebarActions
+            SidebarSearchField(text: $searchQuery)
+                .padding(.bottom, 18)
             toolsSection
             projectHeader
             threadList
@@ -645,6 +652,7 @@ struct CodexSidebar: View {
             ForEach(WorkspacePane.sidebarPanes) { pane in
                 Button {
                     store.activatePane(pane)
+                    store.isSidebarPresented = false
                 } label: {
                     SidebarPaneRow(
                         pane: pane,
@@ -679,17 +687,21 @@ struct CodexSidebar: View {
     private var threadList: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 4) {
-                ForEach(store.threads) { thread in
-                    Button {
-                        store.activatePane(.chat)
-                        Task { await store.select(thread) }
-                    } label: {
-                        SidebarThreadRow(
-                            thread: thread,
-                            isSelected: store.activePane == .chat && store.selectedThread?.id == thread.id
-                        )
+                if filteredThreads.isEmpty {
+                    SidebarSearchEmptyState(query: searchQuery)
+                } else {
+                    ForEach(filteredThreads) { thread in
+                        Button {
+                            store.activatePane(.chat)
+                            Task { await store.select(thread) }
+                        } label: {
+                            SidebarThreadRow(
+                                thread: thread,
+                                isSelected: store.activePane == .chat && store.selectedThread?.id == thread.id
+                            )
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
                 }
             }
         }
@@ -738,6 +750,85 @@ struct SidebarAction: View {
             .foregroundStyle(CodexTheme.text)
         }
         .buttonStyle(.plain)
+    }
+}
+
+private struct SidebarSearchField: View {
+    @Binding var text: String
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        HStack(spacing: 9) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(CodexTheme.secondaryText)
+            TextField("搜索会话", text: $text)
+                .focused($isFocused)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .foregroundStyle(CodexTheme.text)
+                .submitLabel(.search)
+            if !text.isEmpty {
+                Button {
+                    text = ""
+                    isFocused = true
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(CodexTheme.tertiaryText)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .font(.callout.weight(.medium))
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(CodexTheme.panelRaised, in: RoundedRectangle(cornerRadius: 10))
+        .overlay {
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(CodexTheme.separator, lineWidth: 1)
+        }
+    }
+}
+
+private struct SidebarSearchEmptyState: View {
+    var query: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .font(.title3.weight(.semibold))
+                .foregroundStyle(CodexTheme.secondaryText)
+            Text(query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "没有会话" : "没有匹配结果")
+                .font(.callout.weight(.semibold))
+                .foregroundStyle(CodexTheme.text)
+            Text("搜索会话标题、预览或路径。")
+                .font(.caption)
+                .foregroundStyle(CodexTheme.secondaryText)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 14)
+    }
+}
+
+private enum ThreadSearch {
+    static func filter(_ threads: [CodexThread], query: String) -> [CodexThread] {
+        let tokens = query
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .split(whereSeparator: { $0.isWhitespace })
+            .map(String.init)
+        guard !tokens.isEmpty else { return threads }
+        return threads.filter { thread in
+            let fields = [
+                thread.displayTitle,
+                thread.preview,
+                thread.cwd,
+                thread.status,
+            ]
+            return tokens.allSatisfy { token in
+                fields.contains { field in
+                    field.localizedCaseInsensitiveContains(token)
+                }
+            }
+        }
     }
 }
 
@@ -791,6 +882,11 @@ struct SidebarThreadRow: View {
 
 struct CompactThreadListView: View {
     @EnvironmentObject private var store: CodexMobileStore
+    @State private var searchQuery = ""
+
+    private var filteredThreads: [CodexThread] {
+        ThreadSearch.filter(store.threads, query: searchQuery)
+    }
 
     var body: some View {
         ZStack {
@@ -818,24 +914,29 @@ struct CompactThreadListView: View {
                     .buttonStyle(CodexDarkButtonStyle())
                     .disabled(!store.canStartThread)
                     .opacity(store.canStartThread ? 1 : 0.45)
+                    SidebarSearchField(text: $searchQuery)
                     compactToolsSection
                     VStack(alignment: .leading, spacing: 6) {
                         Text("项目")
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(CodexTheme.tertiaryText)
-                        ForEach(store.threads) { thread in
-                            Button {
-                                store.activatePane(.chat)
-                                Task {
-                                    await store.select(thread)
+                        if filteredThreads.isEmpty {
+                            SidebarSearchEmptyState(query: searchQuery)
+                        } else {
+                            ForEach(filteredThreads) { thread in
+                                Button {
+                                    store.activatePane(.chat)
+                                    Task {
+                                        await store.select(thread)
+                                    }
+                                } label: {
+                                    SidebarThreadRow(
+                                        thread: thread,
+                                        isSelected: store.activePane == .chat && store.selectedThread?.id == thread.id
+                                    )
                                 }
-                            } label: {
-                                SidebarThreadRow(
-                                    thread: thread,
-                                    isSelected: store.activePane == .chat && store.selectedThread?.id == thread.id
-                                )
+                                .buttonStyle(.plain)
                             }
-                            .buttonStyle(.plain)
                         }
                     }
                 }
