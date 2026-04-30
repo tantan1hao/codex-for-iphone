@@ -431,43 +431,25 @@ private struct ContextUsageInfoPopover: View {
 
             switch state {
             case .loaded(let snapshot):
-                Text(usagePercentLine(snapshot))
-                    .font(.title3.weight(.regular))
-                    .foregroundStyle(CodexTheme.text)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.78)
-
-                Text(tokenLine(snapshot))
+                Text(percentSummaryLine(snapshot))
                     .font(.title3.weight(.regular))
                     .foregroundStyle(CodexTheme.text)
                     .lineLimit(1)
                     .minimumScaleFactor(0.78)
             case .loading:
-                Text("正在更新背景信息")
+                Text("百分比更新中")
                     .font(.title3.weight(.regular))
                     .foregroundStyle(CodexTheme.text)
                     .lineLimit(1)
             case .unsupported:
-                Text("等待背景信息")
+                Text("百分比等待更新")
                     .font(.title3.weight(.regular))
                     .foregroundStyle(CodexTheme.text)
-                    .lineLimit(1)
-
-                Text("发送或恢复会话后更新")
-                    .font(.subheadline)
-                    .foregroundStyle(CodexTheme.secondaryText)
-                    .multilineTextAlignment(.center)
                     .lineLimit(1)
             case .error:
-                Text("背景信息不可用")
+                Text("百分比不可用")
                     .font(.title3.weight(.regular))
                     .foregroundStyle(CodexTheme.text)
-                    .lineLimit(1)
-
-                Text("请稍后重试")
-                    .font(.subheadline)
-                    .foregroundStyle(CodexTheme.secondaryText)
-                    .multilineTextAlignment(.center)
                     .lineLimit(1)
             }
 
@@ -488,55 +470,18 @@ private struct ContextUsageInfoPopover: View {
         }
     }
 
-    private func usagePercentLine(_ snapshot: ContextUsageFeatureView.Snapshot) -> String {
+    private func percentSummaryLine(_ snapshot: ContextUsageFeatureView.Snapshot) -> String {
         guard let usedFraction = snapshot.usedFraction,
               let remainingFraction = snapshot.resolvedRemainingFraction
         else {
-            if let tokensInContext = snapshot.tokensInContext {
-                return "已用 \(compactTokenCount(tokensInContext)) 标记"
-            }
-            return "等待 Codex 返回用量"
+            return "百分比等待更新"
         }
         return "\(percentText(usedFraction)) 已用（剩余 \(percentText(remainingFraction))）"
-    }
-
-    private func tokenLine(_ snapshot: ContextUsageFeatureView.Snapshot) -> String {
-        guard let tokensInContext = snapshot.tokensInContext,
-              let contextWindow = snapshot.contextWindow
-        else {
-            if let contextWindow = snapshot.contextWindow {
-                return "共 \(compactTokenCount(contextWindow)) 标记"
-            }
-            if snapshot.tokensInContext != nil {
-                return "上下文窗口等待更新"
-            }
-            return "token 用量等待更新"
-        }
-        return "已用 \(compactTokenCount(tokensInContext)) 标记，共 \(compactTokenCount(contextWindow))"
     }
 
     private func percentText(_ fraction: Double) -> String {
         let clampedFraction = min(max(fraction, 0), 1)
         return "\(Int((clampedFraction * 100).rounded()))%"
-    }
-
-    private func compactTokenCount(_ value: Int) -> String {
-        let absoluteValue = abs(value)
-        if absoluteValue >= 1_000_000 {
-            return "\(compactDecimal(Double(value) / 1_000_000))m"
-        }
-        if absoluteValue >= 1_000 {
-            return "\(Int((Double(value) / 1_000).rounded()))k"
-        }
-        return value.formatted(.number)
-    }
-
-    private func compactDecimal(_ value: Double) -> String {
-        let rounded = (value * 10).rounded() / 10
-        if rounded.rounded() == rounded {
-            return "\(Int(rounded))"
-        }
-        return String(format: "%.1f", rounded)
     }
 }
 
