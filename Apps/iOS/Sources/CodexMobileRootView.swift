@@ -492,6 +492,9 @@ private struct ContextUsageInfoPopover: View {
         guard let usedFraction = snapshot.usedFraction,
               let remainingFraction = snapshot.resolvedRemainingFraction
         else {
+            if let tokensInContext = snapshot.tokensInContext {
+                return "已用 \(compactTokenCount(tokensInContext)) 标记"
+            }
             return "等待 Codex 返回用量"
         }
         return "\(percentText(usedFraction)) 已用（剩余 \(percentText(remainingFraction))）"
@@ -501,6 +504,12 @@ private struct ContextUsageInfoPopover: View {
         guard let tokensInContext = snapshot.tokensInContext,
               let contextWindow = snapshot.contextWindow
         else {
+            if let contextWindow = snapshot.contextWindow {
+                return "共 \(compactTokenCount(contextWindow)) 标记"
+            }
+            if snapshot.tokensInContext != nil {
+                return "上下文窗口等待更新"
+            }
             return "token 用量等待更新"
         }
         return "已用 \(compactTokenCount(tokensInContext)) 标记，共 \(compactTokenCount(contextWindow))"

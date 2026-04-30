@@ -520,6 +520,7 @@ final class CodexMobileStore: ObservableObject {
             if !threads.contains(where: { $0.id == thread.id }) {
                 threads.insert(thread, at: 0)
             }
+            updateTokenUsage(from: value)
             sortThreads()
             conversation = ConversationState(threadID: thread.id)
             historyContentNotice = nil
@@ -551,6 +552,7 @@ final class CodexMobileStore: ObservableObject {
             let value = try await client.resumeThread(id: thread.id)
             // Only apply if the user hasn't already switched away
             guard selectedThread?.id == thread.id else { return }
+            updateTokenUsage(from: value)
             if let resumedThread = CodexThread.parseStartOrResumeResponse(value) {
                 selectedThread = mergeThread(existing: thread, incoming: resumedThread)
             } else {
@@ -559,6 +561,7 @@ final class CodexMobileStore: ObservableObject {
             isLoadingHistoryContent = true
             let turnsValue = try await client.listThreadTurns(threadID: thread.id, limit: Self.historyPageLimit)
             guard selectedThread?.id == thread.id, shouldLoadHistoryContent else { return }
+            updateTokenUsage(from: turnsValue)
             conversation = ConversationReducer.state(fromTurnsListResponse: turnsValue, threadID: thread.id)
             historyNextCursor = ConversationReducer.nextCursor(fromTurnsListResponse: turnsValue)
             isLoadingHistoryContent = false
@@ -600,13 +603,14 @@ final class CodexMobileStore: ObservableObject {
         do {
             connectionState = .running
             let cwd = selectedThread?.cwd.isEmpty == false ? selectedThread?.cwd ?? "" : pairing?.cwd ?? ""
-            _ = try await client.startTurn(
+            let value = try await client.startTurn(
                 threadID: threadID,
                 text: text,
                 cwd: cwd,
                 settings: currentSessionSettings,
                 collaborationMode: isPlanModeEnabled ? planCollaborationMode : nil
             )
+            updateTokenUsage(from: value)
             clearOptimisticStatus(id: optimisticID)
             scheduleThreadListRefresh()
             scheduleSelectedThreadContentRefresh(delay: .milliseconds(250), forceLatest: historyContentNotice == .oversized)
@@ -1080,6 +1084,7 @@ final class CodexMobileStore: ObservableObject {
             let limit = forceLatest || historyContentNotice != nil ? 1 : Self.selectedThreadSyncPageLimit
             let value = try await client.listThreadTurns(threadID: threadID, limit: limit)
             guard selectedThread?.id == threadID else { return }
+            updateTokenUsage(from: value)
             let refreshedState = ConversationReducer.state(fromTurnsListResponse: value, threadID: threadID)
             mergeConversation(refreshedState)
             if historyNextCursor == nil {
@@ -1447,13 +1452,10 @@ extension CodexMobileStore: TerminalFeatureActionProviding, WorkspaceFileDataSou
     func syncFeatureState(from event: AppServerEvent) {
         switch event {
         case let .notification(method, params):
+            updateTokenUsage(from: params, threadID: event.threadID)
             switch method {
             case "thread/tokenUsage/updated":
-                if let usage = CodexTokenUsage.parse(params ?? .null) {
-                    latestTokenUsage = usage
-                    contextCompactStatus = compactStatus(for: usage)
-                    updateContextUsageState()
-                }
+                break
             case "thread/compacted":
                 contextCompactStatus = .compacted(message: "当前会话上下文已压缩。")
                 updateContextUsageState()
@@ -1494,6 +1496,21 @@ extension CodexMobileStore: TerminalFeatureActionProviding, WorkspaceFileDataSou
                 lastUpdated: formattedNow()
             )
         )
+    }
+
+    private func updateTokenUsage(from value: JSONValue?, threadID: String? = nil) {
+        if let threadID,
+           let selectedThreadID = selectedThread?.id,
+           threadID != selectedThreadID
+        {
+            return
+        }
+        guard let value,
+              let usage = CodexTokenUsage.find(in: value)
+        else { return }
+        latestTokenUsage = usage
+        contextCompactStatus = compactStatus(for: usage)
+        updateContextUsageState()
     }
 
     private func compactStatus(for usage: CodexTokenUsage) -> ContextUsageFeatureView.CompactStatus {

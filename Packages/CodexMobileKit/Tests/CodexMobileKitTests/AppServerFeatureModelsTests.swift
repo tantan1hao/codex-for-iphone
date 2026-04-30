@@ -40,6 +40,35 @@ final class AppServerFeatureModelsTests: XCTestCase {
         XCTAssertEqual(usage.percentRemaining, 25)
     }
 
+    func testFindsNestedTokenUsage() throws {
+        let value: JSONValue = [
+            "thread": [
+                "turns": [
+                    [
+                        "response": [
+                            "token_usage": [
+                                "tokens_in_context": 80_000,
+                                "context_window": 258_000,
+                            ],
+                        ],
+                    ],
+                ],
+            ],
+        ]
+
+        let usage = try XCTUnwrap(CodexTokenUsage.find(in: value))
+        XCTAssertEqual(usage.totalTokens, 80_000)
+        XCTAssertEqual(usage.tokenLimit, 258_000)
+        XCTAssertEqual(Int((try XCTUnwrap(usage.percentRemaining)).rounded()), 69)
+    }
+
+    func testTokenUsageRejectsObjectsWithoutUsageFields() throws {
+        XCTAssertNil(CodexTokenUsage.parse([
+            "id": "thread-1",
+            "preview": "hello",
+        ]))
+    }
+
     func testFileEntryDirectoryAndImageDetection() throws {
         let directory = try XCTUnwrap(CodexRemoteFileEntry.parse([
             "path": "/workspace/Sources",
