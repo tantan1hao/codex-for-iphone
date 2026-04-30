@@ -67,4 +67,11 @@ final class JSONRPCTests: XCTestCase {
         XCTAssertEqual(params?["cursor"]?.stringValue, "cursor_1")
         XCTAssertEqual(params?["sortDirection"]?.stringValue, "desc")
     }
+
+    func testBuildsTurnInterruptParamsWithTurnID() {
+        let params = AppServerWebSocketClient.interruptTurnParams(threadID: "thr_1", turnID: "turn_1").objectValue
+
+        XCTAssertEqual(params?["threadId"]?.stringValue, "thr_1")
+        XCTAssertEqual(params?["turnId"]?.stringValue, "turn_1")
+    }
 }

@@ -83,6 +83,20 @@ public struct ConversationItem: Identifiable, Equatable, Sendable {
     }
 }
 
+public struct ApprovalDecisionOption: Identifiable, Equatable, Sendable {
+    public var id: String
+    public var title: String
+    public var value: JSONValue
+    public var isAffirmative: Bool
+
+    public init(id: String, title: String, value: JSONValue, isAffirmative: Bool) {
+        self.id = id
+        self.title = title
+        self.value = value
+        self.isAffirmative = isAffirmative
+    }
+}
+
 public struct ApprovalRequest: Identifiable, Equatable, Sendable {
     public var id: JSONRPCID
     public var method: String
@@ -92,6 +106,8 @@ public struct ApprovalRequest: Identifiable, Equatable, Sendable {
     public var title: String
     public var body: String
     public var availableDecisions: [String]
+    public var decisionOptions: [ApprovalDecisionOption]
+    public var requestedPermissions: JSONValue
 
     public init(id: JSONRPCID, method: String, params: JSONValue?) {
         let object = params?.objectValue ?? [:]
@@ -102,24 +118,23 @@ public struct ApprovalRequest: Identifiable, Equatable, Sendable {
         self.itemID = object["itemId"]?.stringValue
         self.title = ApprovalRequest.title(method: method, params: object)
         self.body = ApprovalRequest.body(method: method, params: object)
-        self.availableDecisions = object["availableDecisions"]?.arrayValue?
-            .compactMap(\.stringValue)
-            .filter { ["accept", "acceptForSession", "decline", "cancel"].contains($0) } ?? [
-                "accept",
-                "decline",
-                "cancel",
-            ]
+        self.requestedPermissions = object["permissions"] ?? .object([:])
+        self.decisionOptions = ApprovalRequest.decisionOptions(method: method, params: object)
+        self.availableDecisions = decisionOptions.map(\.id)
+    }
+
+    public func response(decision option: ApprovalDecisionOption) -> JSONValue {
+        if method == "item/permissions/requestApproval" {
+            let permissions: JSONValue = option.isAffirmative ? requestedPermissions : .object([:])
+            let scope: JSONValue = option.id == "acceptForSession" ? "session" : "turn"
+            return ["scope": scope, "permissions": permissions]
+        }
+        return ["decision": option.value]
     }
 
     public func response(decision: String) -> JSONValue {
-        if method == "item/permissions/requestApproval", decision == "accept" {
-            return ["scope": "turn", "permissions": requestedPermissions]
-        }
-        return ["decision": .string(decision)]
-    }
-
-    private var requestedPermissions: JSONValue {
-        .object([:])
+        let option = decisionOptions.first { $0.id == decision } ?? ApprovalRequest.fallbackDecisionOption(id: decision)
+        return response(decision: option)
     }
 
     private static func title(method: String, params: [String: JSONValue]) -> String {
@@ -154,10 +169,62 @@ public struct ApprovalRequest: Identifiable, Equatable, Sendable {
         }
         return method
     }
+
+    private static func decisionOptions(method: String, params: [String: JSONValue]) -> [ApprovalDecisionOption] {
+        let advertised = params["availableDecisions"]?.arrayValue ?? []
+        let parsed = advertised.enumerated().compactMap { index, value in
+            decisionOption(value: value, index: index)
+        }
+        if !parsed.isEmpty {
+            return parsed
+        }
+        return ["accept", "decline", "cancel"].enumerated().map { index, decision in
+            decisionOption(value: .string(decision), index: index) ?? fallbackDecisionOption(id: decision)
+        }
+    }
+
+    private static func decisionOption(value: JSONValue, index: Int) -> ApprovalDecisionOption? {
+        if let decision = value.stringValue {
+            guard ["accept", "acceptForSession", "decline", "cancel"].contains(decision) else { return nil }
+            return fallbackDecisionOption(id: decision)
+        }
+        guard let object = value.objectValue,
+              let key = object.keys.sorted().first,
+              ["acceptWithExecpolicyAmendment", "applyNetworkPolicyAmendment"].contains(key)
+        else { return nil }
+        return ApprovalDecisionOption(
+            id: "\(key)-\(index)",
+            title: decisionTitle(key),
+            value: value,
+            isAffirmative: true
+        )
+    }
+
+    private static func fallbackDecisionOption(id: String) -> ApprovalDecisionOption {
+        ApprovalDecisionOption(
+            id: id,
+            title: decisionTitle(id),
+            value: .string(id),
+            isAffirmative: ["accept", "acceptForSession"].contains(id)
+        )
+    }
+
+    private static func decisionTitle(_ decision: String) -> String {
+        switch decision {
+        case "accept": "批准"
+        case "acceptForSession": "本会话批准"
+        case "acceptWithExecpolicyAmendment": "批准并记住"
+        case "applyNetworkPolicyAmendment": "应用网络规则"
+        case "decline": "拒绝"
+        case "cancel": "取消"
+        default: decision
+        }
+    }
 }
 
 public struct ConversationState: Equatable, Sendable {
     public var threadID: String?
+    public var activeTurnID: String?
     public var items: [ConversationItem] = []
     public var isRunning = false
     public var activeApproval: ApprovalRequest?
@@ -193,10 +260,62 @@ public enum ConversationReducer {
         value.objectValue?["nextCursor"]?.stringValue
     }
 
+    public static func merging(existing: ConversationState, incoming: ConversationState) -> ConversationState {
+        guard incoming.threadID == nil || existing.threadID == nil || incoming.threadID == existing.threadID else {
+            return existing
+        }
+        var state = existing
+        if let threadID = incoming.threadID {
+            state.threadID = threadID
+        }
+        if !incoming.items.isEmpty {
+            if let replacementRange = matchingRange(in: state.items, pattern: incoming.items) {
+                state.items.replaceSubrange(replacementRange, with: incoming.items)
+            } else {
+                for item in incoming.items {
+                    upsertOrAppend(&state.items, item: item)
+                }
+            }
+            state.items = collapsedAdjacentDuplicates(state.items)
+        }
+        state.isRunning = incoming.isRunning
+        state.activeTurnID = incoming.activeTurnID ?? (incoming.isRunning ? state.activeTurnID : nil)
+        state.activeApproval = incoming.activeApproval ?? state.activeApproval
+        state.lastError = incoming.lastError ?? state.lastError
+        return state
+    }
+
+    public static func prependingOlder(existing: ConversationState, older: ConversationState) -> ConversationState {
+        guard older.threadID == nil || existing.threadID == nil || older.threadID == existing.threadID else {
+            return existing
+        }
+        var state = existing
+        var items = older.items
+        for item in existing.items {
+            upsertOrAppend(&items, item: item)
+        }
+        state.items = collapsedAdjacentDuplicates(items)
+        state.isRunning = existing.isRunning || older.isRunning
+        state.activeTurnID = existing.activeTurnID ?? older.activeTurnID
+        if !state.isRunning {
+            state.activeTurnID = nil
+        }
+        state.activeApproval = existing.activeApproval ?? older.activeApproval
+        state.lastError = existing.lastError ?? older.lastError
+        return state
+    }
+
+    public static func normalized(_ state: ConversationState) -> ConversationState {
+        var state = state
+        state.items = collapsedAdjacentDuplicates(state.items)
+        return state
+    }
+
     public static func reduce(_ state: inout ConversationState, event: AppServerEvent) {
         switch event {
         case let .serverRequest(id, method, params):
             state.activeApproval = ApprovalRequest(id: id, method: method, params: params)
+            state.activeTurnID = state.activeApproval?.turnID ?? state.activeTurnID
             let approval = state.activeApproval
             if let approval {
                 upsert(
@@ -214,6 +333,7 @@ public enum ConversationReducer {
             reduceNotification(&state, method: method, params: params)
         case let .disconnected(message):
             state.isRunning = false
+            state.activeTurnID = nil
             state.lastError = message
         }
     }
@@ -227,8 +347,13 @@ public enum ConversationReducer {
             }
         case "turn/started":
             state.isRunning = true
+            state.activeTurnID = object["turnId"]?.stringValue
+                ?? object["turn"]?.objectValue?["id"]?.stringValue
+                ?? state.activeTurnID
         case "turn/completed":
             state.isRunning = false
+            state.activeTurnID = nil
+            state.activeApproval = nil
         case "serverRequest/resolved":
             state.activeApproval = nil
         case "item/started", "item/completed":
@@ -298,6 +423,7 @@ public enum ConversationReducer {
         guard let turnObject = turn.objectValue else { return }
         if turnObject["status"]?.stringValue == "inProgress" {
             state.isRunning = true
+            state.activeTurnID = turnObject["id"]?.stringValue ?? state.activeTurnID
         }
         for itemValue in turnObject["items"]?.arrayValue ?? [] {
             if let item = parseItem(itemValue) {
@@ -340,6 +466,71 @@ public enum ConversationReducer {
             state.items[index] = item
         } else {
             state.items.append(item)
+        }
+    }
+
+    private static func upsertOrAppend(_ items: inout [ConversationItem], item: ConversationItem) {
+        if let index = items.firstIndex(where: { $0.id == item.id }) {
+            items[index] = item
+            return
+        }
+        if let last = items.indices.last,
+           areSemanticDuplicates(items[last], item)
+        {
+            items[last] = item
+            return
+        }
+        items.append(item)
+    }
+
+    private static func matchingRange(in existing: [ConversationItem], pattern incoming: [ConversationItem]) -> Range<Int>? {
+        guard !incoming.isEmpty, existing.count >= incoming.count else { return nil }
+        let incomingKeys = incoming.map(semanticFingerprint)
+        guard incomingKeys.allSatisfy({ $0 != nil }) else { return nil }
+        for start in stride(from: existing.count - incoming.count, through: 0, by: -1) {
+            var matches = true
+            for offset in incoming.indices {
+                if semanticFingerprint(existing[start + offset]) != incomingKeys[offset] {
+                    matches = false
+                    break
+                }
+            }
+            if matches {
+                return start..<(start + incoming.count)
+            }
+        }
+        return nil
+    }
+
+    private static func collapsedAdjacentDuplicates(_ items: [ConversationItem]) -> [ConversationItem] {
+        var result: [ConversationItem] = []
+        for item in items {
+            if let last = result.indices.last,
+               areSemanticDuplicates(result[last], item)
+            {
+                result[last] = item
+            } else {
+                result.append(item)
+            }
+        }
+        return result
+    }
+
+    private static func areSemanticDuplicates(_ lhs: ConversationItem, _ rhs: ConversationItem) -> Bool {
+        guard let lhsKey = semanticFingerprint(lhs),
+              let rhsKey = semanticFingerprint(rhs)
+        else { return false }
+        return lhsKey == rhsKey
+    }
+
+    private static func semanticFingerprint(_ item: ConversationItem) -> String? {
+        let body = item.body.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !body.isEmpty else { return nil }
+        switch item.kind {
+        case .user, .assistant, .reasoning, .plan, .command, .tool, .warning, .error:
+            return "\(item.kind.rawValue)\u{1f}\(item.title)\u{1f}\(body)"
+        case .fileChange, .approval:
+            return nil
         }
     }
 

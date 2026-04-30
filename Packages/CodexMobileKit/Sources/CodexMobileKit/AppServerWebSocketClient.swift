@@ -8,6 +8,10 @@ public final class AppServerWebSocketClient {
     private var nextRequestID = 1
     private var pendingRequests: [JSONRPCID: CheckedContinuation<JSONValue, Error>] = [:]
     private let eventContinuation: AsyncStream<AppServerEvent>.Continuation
+    private var connectionMode: PairingConnectionMode = .direct
+    private var remoteControlClientID = ""
+    private var remoteControlStreamID = ""
+    private var remoteControlNextSeqID = 1
 
     public let events: AsyncStream<AppServerEvent>
 
@@ -23,15 +27,26 @@ public final class AppServerWebSocketClient {
     }
 
     public func connect(to pairing: PairingPayload, appVersion: String) async throws {
-        if !pairing.usesRelay {
-            try await checkReady(to: pairing)
+        let plan = pairing.connectionPlan
+        if let readyzURL = plan.readyzURL {
+            try await checkReady(url: readyzURL)
         }
-        var request = URLRequest(url: pairing.websocketURL)
+        connectionMode = pairing.connectionMode
+        if plan.usesRemoteControlEnvelope {
+            remoteControlClientID = "codex-mobile-\(UUID().uuidString)"
+            remoteControlStreamID = UUID().uuidString
+            remoteControlNextSeqID = 1
+        } else {
+            remoteControlClientID = ""
+            remoteControlStreamID = ""
+            remoteControlNextSeqID = 1
+        }
+        var request = URLRequest(url: plan.webSocketURL)
         request.setValue("Bearer \(pairing.token)", forHTTPHeaderField: "Authorization")
         let socket = URLSession.shared.webSocketTask(with: request)
         self.task = socket
         socket.resume()
-        if pairing.usesRelay {
+        if plan.registersRelay {
             try await registerRelay(pairing: pairing)
         }
         startReceiveLoop()
@@ -54,8 +69,10 @@ public final class AppServerWebSocketClient {
             room: room,
             name: "Codex Mobile",
             token: pairing.token,
+            capabilities: pairing.usesRemoteControl ? ["remote_control_v2"] : nil,
             metadata: [
                 "adapter": "codex_mobile_ios",
+                "mode": .string(pairing.usesRemoteControl ? "remote_control" : "raw_jsonrpc"),
                 "cwd": .string(pairing.cwd),
             ]
         )
@@ -67,7 +84,11 @@ public final class AppServerWebSocketClient {
     }
 
     public func checkReady(to pairing: PairingPayload) async throws {
-        var request = URLRequest(url: pairing.readyzURL)
+        try await checkReady(url: pairing.readyzURL)
+    }
+
+    public func checkReady(url: URL) async throws {
+        var request = URLRequest(url: url)
         request.timeoutInterval = 2
         let (_, response) = try await URLSession.shared.data(for: request)
         guard let httpResponse = response as? HTTPURLResponse else {
@@ -81,6 +102,9 @@ public final class AppServerWebSocketClient {
     public func disconnect(emitEvent: Bool = true) {
         task?.cancel(with: .goingAway, reason: nil)
         task = nil
+        connectionMode = .direct
+        remoteControlClientID = ""
+        remoteControlStreamID = ""
         for (_, continuation) in pendingRequests {
             continuation.resume(throwing: AppServerClientError.notConnected)
         }
@@ -185,8 +209,8 @@ public final class AppServerWebSocketClient {
     }
 
     @discardableResult
-    public func interruptTurn(threadID: String) async throws -> JSONValue {
-        try await sendRequest(method: "turn/interrupt", params: ["threadId": .string(threadID)])
+    public func interruptTurn(threadID: String, turnID: String? = nil) async throws -> JSONValue {
+        try await sendRequest(method: "turn/interrupt", params: Self.interruptTurnParams(threadID: threadID, turnID: turnID))
     }
 
     public func respondToServerRequest(id: JSONRPCID, result: JSONValue) async throws {
@@ -260,7 +284,23 @@ public final class AppServerWebSocketClient {
 
     private func send(message: JSONRPCMessage) async throws {
         guard let task else { throw AppServerClientError.notConnected }
-        let data = try encoder.encode(message)
+        let data: Data
+        if connectionMode == .remoteControl {
+            guard !remoteControlClientID.isEmpty, !remoteControlStreamID.isEmpty else {
+                throw AppServerClientError.transport("Remote control session is not initialized.")
+            }
+            let seqID = remoteControlNextSeqID
+            remoteControlNextSeqID += 1
+            let envelope = RemoteControlClientEnvelope.clientMessage(
+                message,
+                clientID: remoteControlClientID,
+                streamID: remoteControlStreamID,
+                seqID: seqID
+            )
+            data = try encoder.encode(envelope)
+        } else {
+            data = try encoder.encode(message)
+        }
         guard let rawMessage = String(data: data, encoding: .utf8) else {
             throw AppServerClientError.malformedMessage
         }
@@ -287,6 +327,11 @@ public final class AppServerWebSocketClient {
     }
 
     private func handle(webSocketMessage: URLSessionWebSocketTask.Message) async throws {
+        if connectionMode == .remoteControl {
+            try await handleRemoteControl(webSocketMessage: webSocketMessage)
+            return
+        }
+
         if let control = CodexRelayWire.control(from: webSocketMessage) {
             switch control.type {
             case "ping":
@@ -303,6 +348,49 @@ public final class AppServerWebSocketClient {
 
         let data = try CodexRelayWire.data(from: webSocketMessage)
         let message = try decoder.decode(JSONRPCMessage.self, from: data)
+        try handle(jsonRPCMessage: message)
+    }
+
+    private func handleRemoteControl(webSocketMessage: URLSessionWebSocketTask.Message) async throws {
+        if let control = CodexRelayWire.control(from: webSocketMessage),
+           control.type == "relay_error" {
+            throw AppServerClientError.transport(control.error ?? "Relay connection failed.")
+        }
+
+        let data = try CodexRelayWire.data(from: webSocketMessage)
+        let envelope = try decoder.decode(RemoteControlServerEnvelope.self, from: data)
+        guard envelope.clientID == remoteControlClientID else {
+            return
+        }
+        switch envelope.type {
+        case .serverMessage:
+            if let seqID = envelope.seqID {
+                try await sendRemoteControlAck(seqID: seqID, streamID: envelope.streamID)
+            }
+            guard let message = envelope.message else {
+                throw AppServerClientError.malformedMessage
+            }
+            try handle(jsonRPCMessage: message)
+        case .ack, .pong:
+            return
+        }
+    }
+
+    private func sendRemoteControlAck(seqID: Int, streamID: String?) async throws {
+        guard let task else { throw AppServerClientError.notConnected }
+        let envelope = RemoteControlClientEnvelope.ack(
+            clientID: remoteControlClientID,
+            streamID: streamID ?? remoteControlStreamID,
+            seqID: seqID
+        )
+        let data = try encoder.encode(envelope)
+        guard let rawMessage = String(data: data, encoding: .utf8) else {
+            throw AppServerClientError.malformedMessage
+        }
+        try await task.send(.string(rawMessage))
+    }
+
+    private func handle(jsonRPCMessage message: JSONRPCMessage) throws {
         if let method = message.method, let id = message.id {
             eventContinuation.yield(.serverRequest(id: id, method: method, params: message.params))
             return
@@ -337,6 +425,14 @@ public final class AppServerWebSocketClient {
             "excludeTurns": true,
             "persistExtendedHistory": true,
         ]
+    }
+
+    nonisolated static func interruptTurnParams(threadID: String, turnID: String?) -> JSONValue {
+        var params: [String: JSONValue] = ["threadId": .string(threadID)]
+        if let turnID {
+            params["turnId"] = .string(turnID)
+        }
+        return .object(params)
     }
 
     nonisolated static func threadTurnsListParams(

@@ -19,7 +19,7 @@ public final class AppServerRelayBridge {
     }
 
     public func start(pairing: PairingPayload) async throws {
-        guard pairing.usesRelay,
+        guard pairing.usesRawRelay,
               let relayURL = pairing.relayURL,
               let relayRoom = pairing.relayRoom
         else {

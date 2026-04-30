@@ -562,6 +562,7 @@ struct PairingView: View {
 }
 
 struct CodexWorkspaceView: View {
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @EnvironmentObject private var store: CodexMobileStore
     private let bottomAnchorID = "conversation-bottom-anchor"
 
@@ -587,7 +588,7 @@ struct CodexWorkspaceView: View {
                     .frame(maxWidth: 900)
                     .padding(.horizontal, 24)
                     .padding(.top, 26)
-                    .padding(.bottom, 170)
+                    .padding(.bottom, conversationBottomPadding)
                     .frame(maxWidth: .infinity)
                 }
                 .scrollDismissesKeyboard(.interactively)
@@ -602,6 +603,7 @@ struct CodexWorkspaceView: View {
                     scrollToBottom(scrollProxy)
                 }
             }
+            activeApprovalCard
             ComposerView()
         }
         .background(CodexTheme.appBackground)
@@ -614,6 +616,10 @@ struct CodexWorkspaceView: View {
             "\(item.id):\(item.body.count):\(item.status ?? "")"
         }
         return "\(store.conversation.threadID ?? "")|\(items.joined(separator: "|"))|\(store.conversation.activeApproval?.id.description ?? "")"
+    }
+
+    private var conversationBottomPadding: CGFloat {
+        store.conversation.activeApproval == nil ? 170 : 300
     }
 
     private func scrollToBottom(_ proxy: ScrollViewProxy, animated: Bool = true) {
@@ -633,8 +639,18 @@ struct CodexWorkspaceView: View {
         if store.conversation.items.contains(where: { $0.kind == .fileChange }) {
             CodexChangeSummaryView()
         }
+    }
+
+    @ViewBuilder
+    private var activeApprovalCard: some View {
         if let approval = store.conversation.activeApproval {
             ApprovalCard(approval: approval)
+                .frame(maxWidth: 900)
+                .padding(.horizontal, horizontalSizeClass == .compact ? 20 : 24)
+                .padding(.top, 8)
+                .padding(.bottom, 8)
+                .background(CodexTheme.appBackground)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
         }
     }
 
@@ -844,6 +860,10 @@ struct ConnectionStatusCard: View {
                     .font(.caption.monospaced())
                     .foregroundStyle(CodexTheme.tertiaryText)
                     .lineLimit(2)
+                Text(connectionModeText(for: pairing))
+                    .font(.caption)
+                    .foregroundStyle(pairing.connectionPlan.canRunWithoutDesktopAppChanges ? CodexTheme.secondaryText : CodexTheme.orange)
+                    .lineLimit(2)
                 connectionActions
             } else {
                 Button {
@@ -875,6 +895,17 @@ struct ConnectionStatusCard: View {
             }
             .buttonStyle(CodexDarkButtonStyle())
             .disabled(!store.isConnected)
+        }
+    }
+
+    private func connectionModeText(for pairing: PairingPayload) -> String {
+        return switch pairing.connectionPlan.transport {
+        case .helperLAN:
+            "Helper LAN：不改桌面 Codex，Mac Helper 启动独立 app-server。"
+        case .helperRelay:
+            "Helper Relay：不改桌面 Codex，通过中继连接 Helper app-server。"
+        case .desktopRemoteControl:
+            "Desktop Remote Control：需要桌面 Codex 开启 remote_control。"
         }
     }
 }
@@ -989,6 +1020,8 @@ struct SettingsView: View {
         VStack(spacing: 0) {
             settingsRow(icon: "desktopcomputer", title: "电脑", value: store.pairing?.name ?? "未配对")
             Divider().overlay(CodexTheme.separator)
+            settingsRow(icon: "link", title: "连接模式", value: connectionModeValue)
+            Divider().overlay(CodexTheme.separator)
             settingsRow(icon: "network", title: "地址", value: pairingAddress)
             Divider().overlay(CodexTheme.separator)
             settingsRow(icon: "folder", title: "工作区", value: store.pairing?.cwd ?? "-")
@@ -1031,6 +1064,15 @@ struct SettingsView: View {
     private var pairingAddress: String {
         guard let pairing = store.pairing else { return "-" }
         return "\(pairing.host):\(pairing.port)"
+    }
+
+    private var connectionModeValue: String {
+        guard let pairing = store.pairing else { return "-" }
+        return switch pairing.connectionPlan.transport {
+        case .helperLAN: "Helper LAN"
+        case .helperRelay: "Helper Relay"
+        case .desktopRemoteControl: "Remote Control"
+        }
     }
 
     private func settingsRow(icon: String, title: String, value: String) -> some View {
@@ -1236,35 +1278,44 @@ struct ApprovalCard: View {
     }
 
     private var approvalActions: some View {
-        HStack {
-            ForEach(approval.availableDecisions, id: \.self) { decision in
-                approvalButton(decision)
+        HStack(spacing: 8) {
+            ForEach(approval.decisionOptions) { option in
+                approvalButton(option)
             }
         }
     }
 
     @ViewBuilder
-    private func approvalButton(_ decision: String) -> some View {
-        if decision == "accept" {
-            Button(decisionTitle(decision)) {
-                Task { await store.answerApproval(decision) }
+    private func approvalButton(_ option: ApprovalDecisionOption) -> some View {
+        let isResponding = store.answeringApprovalID == approval.id
+        let isSelected = store.answeringApprovalDecisionID == option.id
+        if option.isAffirmative {
+            Button {
+                Task { await store.answerApproval(option) }
+            } label: {
+                approvalButtonLabel(option.title, isSelected: isSelected)
             }
             .buttonStyle(CodexPrimaryButtonStyle())
+            .disabled(isResponding)
         } else {
-            Button(decisionTitle(decision)) {
-                Task { await store.answerApproval(decision) }
+            Button {
+                Task { await store.answerApproval(option) }
+            } label: {
+                approvalButtonLabel(option.title, isSelected: isSelected)
             }
             .buttonStyle(CodexDarkButtonStyle())
+            .disabled(isResponding)
         }
     }
 
-    private func decisionTitle(_ decision: String) -> String {
-        switch decision {
-        case "accept": "批准"
-        case "acceptForSession": "本会话批准"
-        case "decline": "拒绝"
-        case "cancel": "取消"
-        default: decision
+    private func approvalButtonLabel(_ title: String, isSelected: Bool) -> some View {
+        HStack(spacing: 6) {
+            if isSelected {
+                ProgressView()
+                    .controlSize(.small)
+                    .tint(.white)
+            }
+            Text(title)
         }
     }
 }
@@ -1323,14 +1374,23 @@ struct ComposerView: View {
                 Button {
                     Task { await store.interrupt() }
                 } label: {
-                    Image(systemName: "stop.fill")
-                        .font(.headline.weight(.bold))
-                        .foregroundStyle(.white)
-                        .frame(width: 38, height: 38)
-                        .background(CodexTheme.orange, in: Circle())
+                    ZStack {
+                        if store.isInterruptingTurn {
+                            ProgressView()
+                                .controlSize(.small)
+                                .tint(.white)
+                        } else {
+                            Image(systemName: "stop.fill")
+                                .font(.headline.weight(.bold))
+                                .foregroundStyle(.white)
+                        }
+                    }
+                    .frame(width: 38, height: 38)
+                    .background(CodexTheme.orange, in: Circle())
                 }
                 .buttonStyle(.plain)
                 .disabled(!store.canInterruptTurn)
+                .accessibilityLabel(store.isInterruptingTurn ? "正在终止" : "终止当前 turn")
             } else {
                 Button {
                     Task { await store.sendComposerText() }

@@ -98,6 +98,9 @@ final class CodexMobileStore: ObservableObject {
     @Published var isSidebarPresented = false
     @Published var isSettingsPresented = false
     @Published private(set) var isSendingComposer = false
+    @Published private(set) var isInterruptingTurn = false
+    @Published private(set) var answeringApprovalID: JSONRPCID?
+    @Published private(set) var answeringApprovalDecisionID: String?
     @Published private(set) var isUpdatingSessionSettings = false
     @Published private(set) var isLoadingHistoryContent = false
     @Published private(set) var isLoadingMoreHistory = false
@@ -115,6 +118,7 @@ final class CodexMobileStore: ObservableObject {
 
     private static let historyContentPreferenceKey = "CodexMobile.shouldLoadHistoryContent"
     private static let historyPageLimit = 1
+    private static let selectedThreadSyncPageLimit = 3
     private let credentialStore = PairingCredentialStore()
     private var client = AppServerWebSocketClient()
     private var eventTask: Task<Void, Never>?
@@ -145,7 +149,7 @@ final class CodexMobileStore: ObservableObject {
     }
 
     var canInterruptTurn: Bool {
-        isConnected && conversation.isRunning && selectedThread != nil
+        isConnected && conversation.isRunning && selectedThread != nil && !isInterruptingTurn
     }
 
     var canStartThread: Bool {
@@ -252,6 +256,9 @@ final class CodexMobileStore: ObservableObject {
         conversation = ConversationState()
         composerText = ""
         isSendingComposer = false
+        isInterruptingTurn = false
+        answeringApprovalID = nil
+        answeringApprovalDecisionID = nil
         isLoadingHistoryContent = false
         isLoadingMoreHistory = false
         historyNextCursor = nil
@@ -302,6 +309,9 @@ final class CodexMobileStore: ObservableObject {
         selectedThread = nil
         conversation = ConversationState()
         isSendingComposer = false
+        isInterruptingTurn = false
+        answeringApprovalID = nil
+        answeringApprovalDecisionID = nil
         isSettingsPresented = false
         isSidebarPresented = false
         isLoadingHistoryContent = false
@@ -321,6 +331,9 @@ final class CodexMobileStore: ObservableObject {
         conversation = ConversationState()
         isLoadingHistoryContent = false
         isLoadingMoreHistory = false
+        isInterruptingTurn = false
+        answeringApprovalID = nil
+        answeringApprovalDecisionID = nil
         historyNextCursor = nil
         historyContentNotice = nil
         connectionState = .unpaired
@@ -342,6 +355,9 @@ final class CodexMobileStore: ObservableObject {
         conversation = preview.conversation
         composerText = preview.composerText
         isSendingComposer = false
+        isInterruptingTurn = false
+        answeringApprovalID = nil
+        answeringApprovalDecisionID = nil
         isLoadingHistoryContent = false
         isLoadingMoreHistory = false
         historyNextCursor = nil
@@ -426,6 +442,15 @@ final class CodexMobileStore: ObservableObject {
         isLoadingMoreHistory = false
         historyContentNotice = nil
         guard isConnected, !isDesignPreviewMode else { return }
+        if oversizedHistoryThreadIDs.contains(thread.id) {
+            historyContentNotice = .oversized
+            conversation = ConversationState(threadID: thread.id)
+            return
+        }
+        if !shouldLoadHistoryContent {
+            conversation = ConversationState(threadID: thread.id)
+            return
+        }
         do {
             let value = try await client.resumeThread(id: thread.id)
             // Only apply if the user hasn't already switched away
@@ -435,21 +460,12 @@ final class CodexMobileStore: ObservableObject {
             } else {
                 selectedThread = thread
             }
-            if shouldLoadHistoryContent {
-                if oversizedHistoryThreadIDs.contains(thread.id) {
-                    historyContentNotice = .oversized
-                    conversation = ConversationState(threadID: thread.id)
-                    return
-                }
-                isLoadingHistoryContent = true
-                let turnsValue = try await client.listThreadTurns(threadID: thread.id, limit: Self.historyPageLimit)
-                guard selectedThread?.id == thread.id, shouldLoadHistoryContent else { return }
-                conversation = ConversationReducer.state(fromTurnsListResponse: turnsValue, threadID: thread.id)
-                historyNextCursor = ConversationReducer.nextCursor(fromTurnsListResponse: turnsValue)
-                isLoadingHistoryContent = false
-            } else {
-                conversation = ConversationState(threadID: thread.id)
-            }
+            isLoadingHistoryContent = true
+            let turnsValue = try await client.listThreadTurns(threadID: thread.id, limit: Self.historyPageLimit)
+            guard selectedThread?.id == thread.id, shouldLoadHistoryContent else { return }
+            conversation = ConversationReducer.state(fromTurnsListResponse: turnsValue, threadID: thread.id)
+            historyNextCursor = ConversationReducer.nextCursor(fromTurnsListResponse: turnsValue)
+            isLoadingHistoryContent = false
         } catch {
             // Don't tear down the whole connection just because one thread
             // failed to resume — keep the composer usable.
@@ -482,13 +498,17 @@ final class CodexMobileStore: ObservableObject {
             await startNewThread()
         }
         guard let threadID = selectedThread?.id else { return }
+        let optimisticID = appendOptimisticUserMessage(threadID: threadID, text: text)
         composerText = ""
         do {
             connectionState = .running
             let cwd = selectedThread?.cwd.isEmpty == false ? selectedThread?.cwd ?? "" : pairing?.cwd ?? ""
             _ = try await client.startTurn(threadID: threadID, text: text, cwd: cwd, settings: currentSessionSettings)
+            clearOptimisticStatus(id: optimisticID)
             scheduleThreadListRefresh()
+            scheduleSelectedThreadContentRefresh(delay: .milliseconds(250), forceLatest: historyContentNotice == .oversized)
         } catch {
+            removeOptimisticMessage(id: optimisticID)
             if composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 composerText = text
             }
@@ -518,13 +538,7 @@ final class CodexMobileStore: ObservableObject {
             let value = try await client.listThreadTurns(threadID: threadID, limit: Self.historyPageLimit, cursor: cursor)
             guard selectedThread?.id == threadID, shouldLoadHistoryContent else { return }
             let olderState = ConversationReducer.state(fromTurnsListResponse: value, threadID: threadID)
-            var updatedConversation = conversation
-            let existingIDs = Set(updatedConversation.items.map(\.id))
-            let olderItems = olderState.items.filter { !existingIDs.contains($0.id) }
-            updatedConversation.items.insert(contentsOf: olderItems, at: 0)
-            updatedConversation.isRunning = updatedConversation.isRunning || olderState.isRunning
-            updatedConversation.lastError = updatedConversation.lastError ?? olderState.lastError
-            conversation = updatedConversation
+            conversation = ConversationReducer.prependingOlder(existing: conversation, older: olderState)
             historyNextCursor = ConversationReducer.nextCursor(fromTurnsListResponse: value)
             isLoadingMoreHistory = false
         } catch {
@@ -534,7 +548,7 @@ final class CodexMobileStore: ObservableObject {
                 oversizedHistoryThreadIDs.insert(threadID)
                 historyContentNotice = .olderContentOversized
                 historyNextCursor = nil
-                await reconnectTransportPreservingSelection(resumeThreadID: threadID)
+                await reconnectTransportPreservingSelection(resumeThreadID: nil)
                 return
             }
             var updatedConversation = conversation
@@ -615,23 +629,71 @@ final class CodexMobileStore: ObservableObject {
 
     func interrupt() async {
         guard canInterruptTurn, let threadID = selectedThread?.id else { return }
+        isInterruptingTurn = true
         do {
-            _ = try await client.interruptTurn(threadID: threadID)
+            _ = try await client.interruptTurn(threadID: threadID, turnID: conversation.activeTurnID)
         } catch {
+            isInterruptingTurn = false
+            connectionState = .disconnected(error.localizedDescription)
+        }
+    }
+
+    func answerApproval(_ option: ApprovalDecisionOption) async {
+        guard let approval = conversation.activeApproval,
+              approval.decisionOptions.contains(option),
+              answeringApprovalID == nil
+        else { return }
+        answeringApprovalID = approval.id
+        answeringApprovalDecisionID = option.id
+        do {
+            try await client.respondToServerRequest(id: approval.id, result: approval.response(decision: option))
+            var updatedConversation = conversation
+            updatedConversation.activeApproval = nil
+            conversation = updatedConversation
+            answeringApprovalID = nil
+            answeringApprovalDecisionID = nil
+        } catch {
+            answeringApprovalID = nil
+            answeringApprovalDecisionID = nil
             connectionState = .disconnected(error.localizedDescription)
         }
     }
 
     func answerApproval(_ decision: String) async {
-        guard let approval = conversation.activeApproval else { return }
-        do {
-            try await client.respondToServerRequest(id: approval.id, result: approval.response(decision: decision))
-            var updatedConversation = conversation
-            updatedConversation.activeApproval = nil
-            conversation = updatedConversation
-        } catch {
-            connectionState = .disconnected(error.localizedDescription)
+        guard let approval = conversation.activeApproval,
+              let option = approval.decisionOptions.first(where: { $0.id == decision })
+        else { return }
+        await answerApproval(option)
+    }
+
+    private func appendOptimisticUserMessage(threadID: String, text: String) -> String {
+        let id = "optimistic-user-\(UUID().uuidString)"
+        if conversation.threadID != threadID {
+            conversation = ConversationState(threadID: threadID)
         }
+        conversation.items.append(
+            ConversationItem(
+                id: id,
+                kind: .user,
+                title: "You",
+                body: text,
+                status: "sending"
+            )
+        )
+        conversation = ConversationReducer.normalized(conversation)
+        return id
+    }
+
+    private func clearOptimisticStatus(id: String?) {
+        guard let id,
+              let index = conversation.items.firstIndex(where: { $0.id == id })
+        else { return }
+        conversation.items[index].status = nil
+    }
+
+    private func removeOptimisticMessage(id: String?) {
+        guard let id else { return }
+        conversation.items.removeAll { $0.id == id }
     }
 
     private func observeEvents() {
@@ -652,11 +714,15 @@ final class CodexMobileStore: ObservableObject {
                 }
                 var updatedConversation = conversation
                 ConversationReducer.reduce(&updatedConversation, event: event)
-                conversation = updatedConversation
+                conversation = ConversationReducer.normalized(updatedConversation)
+                updatePendingControls(after: event)
                 if case let .disconnected(message) = event {
                     if (isLoadingHistoryContent || isLoadingMoreHistory),
                        isMessageTooLongMessage(message)
                     {
+                        continue
+                    }
+                    if isMessageTooLongMessage(message) {
                         continue
                     }
                     connectionState = classifyConnectionError(AppServerClientError.transport(message))
@@ -666,6 +732,26 @@ final class CodexMobileStore: ObservableObject {
                     connectionState = .connected
                 }
             }
+        }
+    }
+
+    private func updatePendingControls(after event: AppServerEvent) {
+        switch event {
+        case .disconnected:
+            isInterruptingTurn = false
+            answeringApprovalID = nil
+            answeringApprovalDecisionID = nil
+        case let .notification(method, _):
+            if method == "turn/completed" {
+                isInterruptingTurn = false
+                answeringApprovalID = nil
+                answeringApprovalDecisionID = nil
+            } else if method == "serverRequest/resolved" {
+                answeringApprovalID = nil
+                answeringApprovalDecisionID = nil
+            }
+        case .serverRequest:
+            break
         }
     }
 
@@ -697,7 +783,7 @@ final class CodexMobileStore: ObservableObject {
             if threadID == selectedThread?.id,
                object["status"]?.stringValue != "running"
             {
-                scheduleSelectedThreadContentRefresh()
+                scheduleSelectedThreadContentRefresh(forceLatest: historyContentNotice == .oversized)
             }
         case "thread/archived":
             if let threadID = object["threadId"]?.stringValue {
@@ -728,7 +814,7 @@ final class CodexMobileStore: ObservableObject {
                     thread.updatedAt = Date()
                 }
                 if threadID == selectedThread?.id {
-                    scheduleSelectedThreadContentRefresh()
+                    scheduleSelectedThreadContentRefresh(forceLatest: historyContentNotice == .oversized)
                 }
             }
             scheduleThreadListRefresh()
@@ -810,6 +896,7 @@ final class CodexMobileStore: ObservableObject {
                     try await Task.sleep(for: .seconds(3))
                     guard self.isConnected, !self.isDesignPreviewMode else { continue }
                     try await self.loadThreads()
+                    await self.refreshSelectedThreadContent()
                 } catch is CancellationError {
                     return
                 } catch {
@@ -819,13 +906,16 @@ final class CodexMobileStore: ObservableObject {
         }
     }
 
-    private func scheduleSelectedThreadContentRefresh(delay: Duration = .milliseconds(600)) {
+    private func scheduleSelectedThreadContentRefresh(
+        delay: Duration = .milliseconds(600),
+        forceLatest: Bool = false
+    ) {
         guard !isDesignPreviewMode else { return }
         threadContentRefreshTask?.cancel()
         threadContentRefreshTask = Task { @MainActor in
             do {
                 try await Task.sleep(for: delay)
-                await self.refreshSelectedThreadContent()
+                await self.refreshSelectedThreadContent(forceLatest: forceLatest)
             } catch is CancellationError {
             } catch {
                 // Content refresh is opportunistic; keep the current transcript intact.
@@ -833,17 +923,20 @@ final class CodexMobileStore: ObservableObject {
         }
     }
 
-    private func refreshSelectedThreadContent() async {
+    private func refreshSelectedThreadContent(forceLatest: Bool = false) async {
         guard isConnected,
               !isDesignPreviewMode,
+              shouldLoadHistoryContent,
               !conversation.isRunning,
               !isLoadingHistoryContent,
               !isLoadingMoreHistory,
+              (forceLatest || historyContentNotice != .oversized),
               let threadID = selectedThread?.id
         else { return }
 
         do {
-            let value = try await client.listThreadTurns(threadID: threadID, limit: Self.historyPageLimit)
+            let limit = forceLatest || historyContentNotice != nil ? 1 : Self.selectedThreadSyncPageLimit
+            let value = try await client.listThreadTurns(threadID: threadID, limit: limit)
             guard selectedThread?.id == threadID else { return }
             let refreshedState = ConversationReducer.state(fromTurnsListResponse: value, threadID: threadID)
             mergeConversation(refreshedState)
@@ -853,6 +946,10 @@ final class CodexMobileStore: ObservableObject {
         } catch {
             guard selectedThread?.id == threadID else { return }
             if isMessageTooLong(error), let selectedThread {
+                if historyContentNotice != nil {
+                    await reconnectTransportPreservingSelection(resumeThreadID: nil)
+                    return
+                }
                 await handleOversizedHistory(thread: selectedThread)
             }
         }
@@ -860,27 +957,7 @@ final class CodexMobileStore: ObservableObject {
 
     private func mergeConversation(_ incoming: ConversationState) {
         guard incoming.threadID == conversation.threadID else { return }
-        var updatedConversation = conversation
-        if shouldReplaceTail(existing: updatedConversation.items, incoming: incoming.items) {
-            updatedConversation.items.removeLast(incoming.items.count)
-            updatedConversation.items.append(contentsOf: incoming.items)
-            updatedConversation.isRunning = incoming.isRunning
-            updatedConversation.activeApproval = incoming.activeApproval ?? updatedConversation.activeApproval
-            updatedConversation.lastError = incoming.lastError ?? updatedConversation.lastError
-            conversation = updatedConversation
-            return
-        }
-        for incomingItem in incoming.items {
-            if let index = updatedConversation.items.firstIndex(where: { $0.id == incomingItem.id }) {
-                updatedConversation.items[index] = incomingItem
-            } else {
-                updatedConversation.items.append(incomingItem)
-            }
-        }
-        updatedConversation.isRunning = incoming.isRunning
-        updatedConversation.activeApproval = incoming.activeApproval ?? updatedConversation.activeApproval
-        updatedConversation.lastError = incoming.lastError ?? updatedConversation.lastError
-        conversation = updatedConversation
+        conversation = ConversationReducer.merging(existing: conversation, incoming: incoming)
     }
 
     private func selectedThreadNeedsContentRefresh(previous: CodexThread?, updated: CodexThread) -> Bool {
@@ -891,21 +968,6 @@ final class CodexMobileStore: ObservableObject {
         return updatedDate.timeIntervalSince(previousDate) > 0.5
     }
 
-    private func shouldReplaceTail(existing: [ConversationItem], incoming: [ConversationItem]) -> Bool {
-        guard !incoming.isEmpty, existing.count >= incoming.count else { return false }
-        let tail = Array(existing.suffix(incoming.count))
-        return zip(tail, incoming).allSatisfy { existingItem, incomingItem in
-            existingItem.id != incomingItem.id &&
-                existingItem.kind == incomingItem.kind &&
-                existingItem.title == incomingItem.title &&
-                normalizedTranscriptText(existingItem.body) == normalizedTranscriptText(incomingItem.body)
-        }
-    }
-
-    private func normalizedTranscriptText(_ value: String) -> String {
-        value.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
     private func handleOversizedHistory(thread: CodexThread) async {
         guard selectedThread?.id == thread.id else { return }
         oversizedHistoryThreadIDs.insert(thread.id)
@@ -914,7 +976,7 @@ final class CodexMobileStore: ObservableObject {
         historyNextCursor = nil
         historyContentNotice = .oversized
         conversation = ConversationState(threadID: thread.id)
-        await reconnectTransportPreservingSelection(resumeThreadID: thread.id)
+        await reconnectTransportPreservingSelection(resumeThreadID: nil)
     }
 
     private func reconnectTransportPreservingSelection(resumeThreadID: String?) async {

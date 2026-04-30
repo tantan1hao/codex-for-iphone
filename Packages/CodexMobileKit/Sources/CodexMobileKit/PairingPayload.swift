@@ -1,5 +1,11 @@
 import Foundation
 
+public enum PairingConnectionMode: String, Codable, Equatable, Sendable {
+    case direct
+    case rawRelay = "relay"
+    case remoteControl = "remote-control"
+}
+
 public struct PairingPayload: Equatable, Sendable, Codable {
     public static let scheme = "codex-mobile"
     public static let host = "pair"
@@ -12,6 +18,7 @@ public struct PairingPayload: Equatable, Sendable, Codable {
     public var cwd: String
     public var relayURL: URL?
     public var relayRoom: String?
+    public var connectionMode: PairingConnectionMode
 
     public init(
         name: String,
@@ -20,20 +27,22 @@ public struct PairingPayload: Equatable, Sendable, Codable {
         token: String,
         cwd: String,
         relayURL: URL? = nil,
-        relayRoom: String? = nil
+        relayRoom: String? = nil,
+        connectionMode: PairingConnectionMode? = nil
     ) throws {
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedHost = host.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedToken = token.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedCwd = cwd.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedRoom = relayRoom?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedMode = connectionMode ?? ((relayURL != nil || trimmedRoom != nil) ? .rawRelay : .direct)
 
         guard !trimmedName.isEmpty else { throw PairingPayloadError.emptyName }
         guard Self.isValidHost(trimmedHost) else { throw PairingPayloadError.invalidHost }
         guard (1...65535).contains(port) else { throw PairingPayloadError.invalidPort }
         guard trimmedToken.count >= 32 else { throw PairingPayloadError.invalidToken }
         guard trimmedCwd.hasPrefix("/") else { throw PairingPayloadError.invalidCwd }
-        if relayURL != nil || trimmedRoom != nil {
+        if resolvedMode != .direct {
             guard let relayURL, Self.isValidRelayURL(relayURL) else { throw PairingPayloadError.invalidRelayURL }
             guard let trimmedRoom, Self.isValidRelayRoom(trimmedRoom) else { throw PairingPayloadError.invalidRelayRoom }
             self.relayURL = relayURL
@@ -48,6 +57,7 @@ public struct PairingPayload: Equatable, Sendable, Codable {
         self.port = port
         self.token = trimmedToken
         self.cwd = trimmedCwd
+        self.connectionMode = resolvedMode
     }
 
     public var websocketURL: URL {
@@ -66,11 +76,20 @@ public struct PairingPayload: Equatable, Sendable, Codable {
         relayURL != nil && relayRoom != nil
     }
 
+    public var usesRawRelay: Bool {
+        usesRelay && connectionMode == .rawRelay
+    }
+
+    public var usesRemoteControl: Bool {
+        usesRelay && connectionMode == .remoteControl
+    }
+
     public var connectionTargetDescription: String {
         if let relayURL, let relayRoom {
-            "\(relayURL.host ?? relayURL.absoluteString) · \(relayRoom)"
+            let mode = connectionMode == .remoteControl ? "Remote Control" : "Relay"
+            return "\(mode) · \(relayURL.host ?? relayURL.absoluteString) · \(relayRoom)"
         } else {
-            "\(host):\(port)"
+            return "\(host):\(port)"
         }
     }
 
@@ -87,7 +106,7 @@ public struct PairingPayload: Equatable, Sendable, Codable {
             URLQueryItem(name: "cwd", value: cwd),
         ]
         if let relayURL, let relayRoom {
-            queryItems.append(URLQueryItem(name: "mode", value: "relay"))
+            queryItems.append(URLQueryItem(name: "mode", value: connectionMode.rawValue))
             queryItems.append(URLQueryItem(name: "relay", value: relayURL.absoluteString))
             queryItems.append(URLQueryItem(name: "room", value: relayRoom))
         }
@@ -124,6 +143,7 @@ public struct PairingPayload: Equatable, Sendable, Codable {
         }
         let relayURL = items["relay"].flatMap(URL.init(string:))
         let relayRoom = items["room"]
+        let mode = items["mode"].flatMap(PairingConnectionMode.init(rawValue:))
         return try PairingPayload(
             name: name,
             host: host,
@@ -131,7 +151,8 @@ public struct PairingPayload: Equatable, Sendable, Codable {
             token: token,
             cwd: cwd,
             relayURL: relayURL,
-            relayRoom: relayRoom
+            relayRoom: relayRoom,
+            connectionMode: mode
         )
     }
 

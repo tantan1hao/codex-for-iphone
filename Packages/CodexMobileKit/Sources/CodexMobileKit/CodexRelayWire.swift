@@ -21,13 +21,14 @@ public struct CodexRelayRegistration: Codable, Equatable, Sendable {
         room: String,
         name: String,
         token: String,
+        capabilities: [String]? = nil,
         metadata: [String: JSONValue] = [:]
     ) {
         self.type = "register"
         self.v = 1
         self.platform = "codex_mobile"
         self.role = role
-        self.capabilities = ["raw_jsonrpc_tunnel", "ping_pong"]
+        self.capabilities = capabilities ?? ["raw_jsonrpc_tunnel", "ping_pong"]
         self.room = room
         self.name = name
         self.token = token

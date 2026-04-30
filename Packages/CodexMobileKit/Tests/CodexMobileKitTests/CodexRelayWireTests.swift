@@ -32,4 +32,22 @@ final class CodexRelayWireTests: XCTestCase {
         let control = try XCTUnwrap(CodexRelayWire.control(from: pong))
         XCTAssertEqual(control.type, "pong")
     }
+
+    func testEncodesRemoteControlRegisterFrame() throws {
+        let registration = CodexRelayRegistration(
+            role: .phone,
+            room: "7a2d63e5-9b60-487e-aa4d-a4741152ce19",
+            name: "Codex Mobile",
+            token: "550e8400-e29b-41d4-a716-446655440000",
+            capabilities: ["remote_control_v2"],
+            metadata: ["mode": "remote_control"]
+        )
+
+        let data = try CodexRelayWire.registrationData(registration)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let metadata = try XCTUnwrap(object["metadata"] as? [String: Any])
+
+        XCTAssertEqual(object["capabilities"] as? [String], ["remote_control_v2"])
+        XCTAssertEqual(metadata["mode"] as? String, "remote_control")
+    }
 }

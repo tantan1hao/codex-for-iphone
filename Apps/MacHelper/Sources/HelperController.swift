@@ -158,7 +158,7 @@ final class HelperController: ObservableObject {
                     request.timeoutInterval = 1
                     let (_, response) = try await URLSession.shared.data(for: request)
                     if (response as? HTTPURLResponse)?.statusCode == 200 {
-                        if let payload = pairingPayload, payload.usesRelay {
+                        if let payload = pairingPayload, payload.usesRawRelay {
                             status = .relayConnecting
                             do {
                                 let bridge = AppServerRelayBridge()
