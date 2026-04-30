@@ -38,14 +38,14 @@ final class DictationController: ObservableObject {
 
     @discardableResult
     func requestAuthorization() async -> Bool {
-        speechAuthorizationStatus = await requestSpeechAuthorization()
+        speechAuthorizationStatus = await Self.requestSpeechAuthorization()
 
         guard speechAuthorizationStatus == .authorized else {
             state = .denied
             return false
         }
 
-        guard await requestMicrophoneAuthorization() else {
+        guard await Self.requestMicrophoneAuthorization() else {
             state = .denied
             return false
         }
@@ -222,7 +222,7 @@ final class DictationController: ObservableObject {
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 
-    private func requestSpeechAuthorization() async -> SFSpeechRecognizerAuthorizationStatus {
+    nonisolated private static func requestSpeechAuthorization() async -> SFSpeechRecognizerAuthorizationStatus {
         await withCheckedContinuation { continuation in
             SFSpeechRecognizer.requestAuthorization { status in
                 continuation.resume(returning: status)
@@ -230,7 +230,7 @@ final class DictationController: ObservableObject {
         }
     }
 
-    private func requestMicrophoneAuthorization() async -> Bool {
+    nonisolated private static func requestMicrophoneAuthorization() async -> Bool {
         switch AVAudioApplication.shared.recordPermission {
         case .granted:
             true

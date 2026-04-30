@@ -38,13 +38,10 @@ struct ComposerDictationButton: View {
 
     var body: some View {
         Button(action: action) {
-            Label(title, systemImage: symbolName)
+            Image(systemName: symbolName)
                 .font(.callout.weight(.bold))
-                .labelStyle(.titleAndIcon)
                 .foregroundStyle(foregroundStyle)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 7)
-                .frame(minHeight: 34)
+                .frame(width: 36, height: 36)
                 .background(backgroundStyle, in: Capsule())
                 .overlay {
                     Capsule()
@@ -56,19 +53,6 @@ struct ComposerDictationButton: View {
         .opacity(isEnabled ? 1 : 0.5)
         .accessibilityLabel(accessibilityLabel)
         .accessibilityHint(accessibilityHint)
-    }
-
-    private var title: String {
-        switch state {
-        case .idle:
-            "听写"
-        case .listening:
-            "听写中"
-        case .denied:
-            "未授权"
-        case .error:
-            "听写错误"
-        }
     }
 
     private var symbolName: String {
@@ -142,13 +126,10 @@ struct ComposerPlanModeButton: View {
         Button {
             isEnabled.toggle()
         } label: {
-            Label("计划", systemImage: isEnabled ? "checklist.checked" : "list.bullet.rectangle")
+            Image(systemName: isEnabled ? "checklist.checked" : "list.bullet.rectangle")
                 .font(.callout.weight(.bold))
-                .labelStyle(.titleAndIcon)
                 .foregroundStyle(foregroundStyle)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 7)
-                .frame(minHeight: 34)
+                .frame(width: 36, height: 36)
                 .background(backgroundStyle, in: Capsule())
                 .overlay {
                     Capsule()
