@@ -1284,7 +1284,6 @@ struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 18) {
                     settingsHeader
                     ConnectionStatusCard()
-                    settingsDetails
                     themePreferences
                     historyPreferences
                     settingsActions
@@ -1308,23 +1307,6 @@ struct SettingsView: View {
             }
             .buttonStyle(.plain)
             .foregroundStyle(CodexTheme.secondaryText)
-        }
-    }
-
-    private var settingsDetails: some View {
-        VStack(spacing: 0) {
-            settingsRow(icon: "desktopcomputer", title: "电脑", value: store.pairing?.name ?? "未配对")
-            Divider().overlay(CodexTheme.separator)
-            settingsRow(icon: "link", title: "连接模式", value: connectionModeValue)
-            Divider().overlay(CodexTheme.separator)
-            settingsRow(icon: "network", title: "地址", value: pairingAddress)
-            Divider().overlay(CodexTheme.separator)
-            settingsRow(icon: "folder", title: "工作区", value: store.pairing?.cwd ?? "-")
-        }
-        .background(CodexTheme.panel, in: RoundedRectangle(cornerRadius: 12))
-        .overlay {
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(CodexTheme.separator, lineWidth: 1)
         }
     }
 
@@ -1382,76 +1364,23 @@ struct SettingsView: View {
         }
     }
 
-    private var pairingAddress: String {
-        guard let pairing = store.pairing else { return "-" }
-        return "\(pairing.host):\(pairing.port)"
-    }
-
-    private var connectionModeValue: String {
-        guard let pairing = store.pairing else { return "-" }
-        return switch pairing.connectionPlan.transport {
-        case .helperLAN: "Helper LAN"
-        case .helperRelay: "Helper Relay"
-        case .desktopRemoteControl: "Remote Control"
-        }
-    }
-
-    private func settingsRow(icon: String, title: String, value: String) -> some View {
-        HStack(spacing: 12) {
-            Image(systemName: icon)
-                .foregroundStyle(CodexTheme.secondaryText)
-                .frame(width: 22)
-            Text(title)
-                .font(.callout.weight(.semibold))
-                .foregroundStyle(CodexTheme.text)
-            Spacer(minLength: 12)
-            Text(value)
-                .font(.caption)
-                .foregroundStyle(CodexTheme.secondaryText)
-                .lineLimit(1)
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 14)
-    }
-
     private var settingsActions: some View {
-        VStack(spacing: 10) {
-            HStack {
-                Button {
-                    Task { await store.reconnect() }
-                } label: {
-                    Label("重连", systemImage: "arrow.clockwise")
-                }
-                .buttonStyle(CodexDarkButtonStyle())
-                .disabled(!store.canReconnect)
-
-                Button {
-                    store.disconnect()
-                } label: {
-                    Label("断开", systemImage: "power")
-                }
-                .buttonStyle(CodexDarkButtonStyle())
-                .disabled(!store.isConnected)
-                Spacer()
+        HStack {
+            Button(role: .destructive) {
+                store.forgetPairing()
+                dismiss()
+            } label: {
+                Label("取消配对", systemImage: "trash")
             }
-
-            HStack {
-                Button(role: .destructive) {
-                    store.forgetPairing()
-                    dismiss()
-                } label: {
-                    Label("取消配对", systemImage: "trash")
-                }
-                .buttonStyle(CodexDarkButtonStyle())
-                .disabled(store.pairing == nil)
-                Spacer()
-                Button {
-                    dismiss()
-                } label: {
-                    Text("完成")
-                }
-                .buttonStyle(CodexPrimaryButtonStyle())
+            .buttonStyle(CodexDarkButtonStyle())
+            .disabled(store.pairing == nil)
+            Spacer()
+            Button {
+                dismiss()
+            } label: {
+                Text("完成")
             }
+            .buttonStyle(CodexPrimaryButtonStyle())
         }
     }
 }
