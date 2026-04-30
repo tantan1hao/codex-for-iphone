@@ -13,6 +13,7 @@ public final class AppServerWebSocketClient {
     private var remoteControlClientID = ""
     private var remoteControlStreamID = ""
     private var remoteControlNextSeqID = 1
+    private var suppressDisconnectEvents = false
 
     public let events: AsyncStream<AppServerEvent>
 
@@ -47,21 +48,69 @@ public final class AppServerWebSocketClient {
         }
         var request = URLRequest(url: plan.webSocketURL)
         request.setValue("Bearer \(pairing.token)", forHTTPHeaderField: "Authorization")
+        try await establishConnection(
+            request: request,
+            pairing: pairing,
+            plan: plan,
+            generation: generation,
+            appVersion: appVersion
+        )
+    }
+
+    private func establishConnection(
+        request: URLRequest,
+        pairing: PairingPayload,
+        plan: CodexConnectionPlan,
+        generation: Int,
+        appVersion: String
+    ) async throws {
+        let maximumAttempts = plan.registersRelay ? 4 : 1
+        var lastError: Error?
+        suppressDisconnectEvents = true
+        defer { suppressDisconnectEvents = false }
+
+        for attempt in 0..<maximumAttempts {
+            do {
+                try await openWebSocket(request: request, pairing: pairing, plan: plan, generation: generation)
+                startReceiveLoop()
+                try await initialize(appVersion: appVersion)
+                try ensureConnectionIsCurrent(generation)
+                return
+            } catch {
+                closeCurrentTaskAfterFailedConnection(error)
+                guard isTransientSocketNotConnected(error), attempt + 1 < maximumAttempts else {
+                    throw error
+                }
+                lastError = error
+                try await Task.sleep(nanoseconds: retryDelay(forAttempt: attempt))
+            }
+        }
+
+        throw lastError ?? AppServerClientError.notConnected
+    }
+
+    private func openWebSocket(
+        request: URLRequest,
+        pairing: PairingPayload,
+        plan: CodexConnectionPlan,
+        generation: Int
+    ) async throws {
+        try ensureConnectionIsCurrent(generation)
         let socket = URLSession.shared.webSocketTask(with: request)
-        self.task = socket
+        task = socket
         socket.resume()
+
         if plan.registersRelay {
             try await registerRelay(pairing: pairing)
             try ensureConnectionIsCurrent(generation)
         }
-        startReceiveLoop()
-        do {
-            try await initialize(appVersion: appVersion)
-            try ensureConnectionIsCurrent(generation)
-        } catch {
-            disconnect(emitEvent: false)
-            throw error
-        }
+    }
+
+    private func closeCurrentTaskAfterFailedConnection(_ error: Error) {
+        let socket = task
+        task = nil
+        socket?.cancel(with: .goingAway, reason: nil)
+        failPendingRequests(error)
     }
 
     private func ensureConnectionIsCurrent(_ generation: Int) throws {
@@ -325,7 +374,7 @@ public final class AppServerWebSocketClient {
         _ message: URLSessionWebSocketTask.Message,
         on socket: URLSessionWebSocketTask
     ) async throws {
-        let retryDelays: [UInt64] = [0, 100_000_000, 250_000_000, 500_000_000]
+        let retryDelays: [UInt64] = [0, 100_000_000, 250_000_000, 500_000_000, 1_000_000_000]
         var lastError: Error?
         for delay in retryDelays {
             if delay > 0 {
@@ -344,6 +393,10 @@ public final class AppServerWebSocketClient {
         throw lastError ?? AppServerClientError.notConnected
     }
 
+    private func retryDelay(forAttempt attempt: Int) -> UInt64 {
+        UInt64(attempt + 1) * 500_000_000
+    }
+
     private func isTransientSocketNotConnected(_ error: Error) -> Bool {
         let nsError = error as NSError
         if nsError.domain == NSPOSIXErrorDomain && nsError.code == 57 {
@@ -360,11 +413,14 @@ public final class AppServerWebSocketClient {
                     let message = try await task.receive()
                     try await self.handle(webSocketMessage: message)
                 } catch {
-                    self.eventContinuation.yield(.disconnected(error.localizedDescription))
-                    self.failPendingRequests(error)
-                    if self.task === task {
-                        self.task = nil
+                    guard self.task === task else {
+                        return
                     }
+                    if !self.suppressDisconnectEvents {
+                        self.eventContinuation.yield(.disconnected(error.localizedDescription))
+                    }
+                    self.failPendingRequests(error)
+                    self.task = nil
                     return
                 }
             }
