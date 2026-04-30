@@ -179,10 +179,10 @@ private struct ChatPaneContentView: View {
     @EnvironmentObject private var store: CodexMobileStore
 
     var body: some View {
-        if store.pairing == nil {
-            PairingView()
-        } else {
+        if store.isConnected || store.isPreviewMode {
             CodexWorkspaceView()
+        } else {
+            PairingView()
         }
     }
 }
@@ -2059,7 +2059,7 @@ struct ComposerView: View {
 private extension CodexPermissionPreset {
     var tintColor: Color {
         switch self {
-        case .readOnly: CodexTheme.green
+        case .readOnly: CodexTheme.secondaryText
         case .workspaceWrite: CodexTheme.blue
         case .fullAccess: CodexTheme.orange
         }
