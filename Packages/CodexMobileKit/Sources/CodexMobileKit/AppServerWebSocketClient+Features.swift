@@ -9,13 +9,16 @@ public extension AppServerWebSocketClient {
 
     @discardableResult
     func listAutomationTasks() async throws -> [CodexAutomationTaskSummary] {
-        let response = try await sendRequest(method: "tasks/list")
+        let response = try await sendFeatureRequest(methods: Self.automationListMethods)
         return CodexAutomationTaskSummary.parseListResponse(response)
     }
 
     @discardableResult
     func getAutomationTask(id: String) async throws -> CodexAutomationTaskSummary? {
-        let response = try await sendRequest(method: "tasks/get", params: ["id": .string(id)])
+        let response = try await sendFeatureRequest(
+            methods: Self.automationGetMethods,
+            params: ["id": .string(id)]
+        )
         return CodexAutomationTaskSummary.parseGetResponse(response)
     }
 
@@ -149,5 +152,51 @@ private extension CodexCollaborationMode {
         default:
             .string(id)
         }
+    }
+}
+
+private extension AppServerWebSocketClient {
+    static let automationListMethods = [
+        "tasks/list",
+        "task/list",
+        "automations/list",
+        "automation/list",
+        "automation/tasks/list",
+        "automations/tasks/list",
+    ]
+
+    static let automationGetMethods = [
+        "tasks/get",
+        "task/get",
+        "automations/get",
+        "automation/get",
+        "automation/tasks/get",
+        "automations/tasks/get",
+    ]
+
+    func sendFeatureRequest(methods: [String], params: JSONValue? = nil) async throws -> JSONValue {
+        var lastError: Error?
+        for method in methods {
+            do {
+                return try await sendRequest(method: method, params: params)
+            } catch {
+                guard Self.isUnsupportedFeatureMethodError(error) else { throw error }
+                lastError = error
+            }
+        }
+        throw lastError ?? AppServerClientError.transport("Codex app-server does not expose this feature.")
+    }
+
+    static func isUnsupportedFeatureMethodError(_ error: Error) -> Bool {
+        if case let AppServerClientError.requestFailed(rpcError) = error,
+           rpcError.code == -32601
+        {
+            return true
+        }
+        let message = error.localizedDescription
+        return message.localizedCaseInsensitiveContains("method") ||
+            message.localizedCaseInsensitiveContains("not found") ||
+            message.localizedCaseInsensitiveContains("unknown") ||
+            message.localizedCaseInsensitiveContains("unsupported")
     }
 }

@@ -404,6 +404,7 @@ private struct HeaderToolButton: View {
 private struct ContextRemainingRing: View {
     var remainingFraction: Double?
     var isSelected: Bool
+    var progressTint: Color? = nil
 
     var body: some View {
         ZStack {
@@ -431,7 +432,7 @@ private struct ContextRemainingRing: View {
     }
 
     private var progressColor: Color {
-        return isSelected ? CodexTheme.text : CodexTheme.secondaryText
+        return progressTint ?? (isSelected ? CodexTheme.text : CodexTheme.secondaryText)
     }
 }
 
@@ -612,6 +613,8 @@ struct CodexSidebar: View {
         VStack(alignment: .leading, spacing: 0) {
             sidebarTopChrome
             sidebarActions
+            SidebarQuotaCard()
+                .padding(.bottom, 18)
             SidebarSearchField(text: $searchQuery)
                 .padding(.bottom, 18)
             toolsSection
@@ -765,6 +768,134 @@ struct SidebarAction: View {
             .foregroundStyle(CodexTheme.text)
         }
         .buttonStyle(.plain)
+    }
+}
+
+private struct SidebarQuotaCard: View {
+    @EnvironmentObject private var store: CodexMobileStore
+
+    var body: some View {
+        Button {
+            store.activatePane(.context)
+            Task {
+                await store.refreshContextUsage()
+            }
+        } label: {
+            HStack(spacing: 12) {
+                ContextRemainingRing(
+                    remainingFraction: remainingFraction,
+                    isSelected: store.activePane == .context,
+                    progressTint: primaryTint
+                )
+                .frame(width: 28, height: 28)
+
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 6) {
+                        Text("额度")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(CodexTheme.tertiaryText)
+                        Spacer(minLength: 0)
+                        Image(systemName: "chevron.right")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(CodexTheme.tertiaryText)
+                    }
+                    Text(primaryText)
+                        .font(.callout.weight(.semibold))
+                        .foregroundStyle(primaryTint)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.82)
+                    Text(detailText)
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(CodexTheme.secondaryText)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.82)
+                }
+            }
+            .padding(12)
+            .background(CodexTheme.panelRaised, in: RoundedRectangle(cornerRadius: 8))
+            .overlay {
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(CodexTheme.separator, lineWidth: 1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .buttonStyle(.plain)
+        .task {
+            await store.refreshContextUsage()
+        }
+        .accessibilityLabel("额度")
+        .accessibilityValue("\(primaryText)，\(detailText)")
+    }
+
+    private var remainingFraction: Double? {
+        guard case let .loaded(snapshot) = store.contextUsageState else { return nil }
+        return snapshot.resolvedRemainingFraction
+    }
+
+    private var primaryText: String {
+        switch store.contextUsageState {
+        case .loaded(let snapshot):
+            if let fraction = snapshot.resolvedRemainingFraction {
+                return "剩余 \(percentText(fraction))"
+            }
+            return "等待用量"
+        case .loading:
+            return "加载中"
+        case .unsupported:
+            return "等待用量"
+        case .error:
+            return "读取失败"
+        }
+    }
+
+    private var detailText: String {
+        switch store.contextUsageState {
+        case .loaded(let snapshot):
+            if let remainingTokens = snapshot.remainingTokens,
+               let contextWindow = snapshot.contextWindow
+            {
+                return "\(abbreviatedTokens(remainingTokens)) / \(abbreviatedTokens(contextWindow)) tokens"
+            }
+            if let tokensInContext = snapshot.tokensInContext,
+               let contextWindow = snapshot.contextWindow
+            {
+                return "\(abbreviatedTokens(tokensInContext)) / \(abbreviatedTokens(contextWindow)) 已用"
+            }
+            return "上下文窗口"
+        case .loading:
+            return "正在更新"
+        case .unsupported:
+            return store.isConnected ? "发送后更新" : "未连接"
+        case .error:
+            return "点按查看详情"
+        }
+    }
+
+    private var primaryTint: Color {
+        guard let remainingFraction else { return CodexTheme.text }
+        if remainingFraction < 0.15 {
+            return CodexTheme.orange
+        }
+        if remainingFraction < 0.35 {
+            return CodexTheme.blue
+        }
+        return CodexTheme.text
+    }
+
+    private func percentText(_ fraction: Double) -> String {
+        let clampedFraction = min(max(fraction, 0), 1)
+        return "\(Int((clampedFraction * 100).rounded()))%"
+    }
+
+    private func abbreviatedTokens(_ value: Int) -> String {
+        let absoluteValue = abs(value)
+        if absoluteValue >= 1_000_000 {
+            return String(format: "%.1fM", Double(value) / 1_000_000)
+        }
+        if absoluteValue >= 1_000 {
+            return "\(Int((Double(value) / 1_000).rounded()))K"
+        }
+        return value.formatted(.number)
     }
 }
 
@@ -929,6 +1060,7 @@ struct CompactThreadListView: View {
                     .buttonStyle(CodexDarkButtonStyle())
                     .disabled(!store.canStartThread)
                     .opacity(store.canStartThread ? 1 : 0.45)
+                    SidebarQuotaCard()
                     SidebarSearchField(text: $searchQuery)
                     compactToolsSection
                     VStack(alignment: .leading, spacing: 6) {

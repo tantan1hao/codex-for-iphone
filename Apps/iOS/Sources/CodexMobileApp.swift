@@ -1548,6 +1548,7 @@ extension CodexMobileStore: TerminalFeatureActionProviding, WorkspaceFileDataSou
         let message = error.localizedDescription
         if message.localizedCaseInsensitiveContains("method") ||
             message.localizedCaseInsensitiveContains("not found") ||
+            message.localizedCaseInsensitiveContains("unknown") ||
             message.localizedCaseInsensitiveContains("unsupported")
         {
             return .unsupported(message: "当前 Codex app-server 不支持自动化列表接口。")
@@ -1567,10 +1568,29 @@ extension CodexMobileStore: TerminalFeatureActionProviding, WorkspaceFileDataSou
             detail: AutomationsFeatureView.Detail(
                 triggerDescription: task.schedule,
                 prompt: task.prompt,
-                targetDescription: task.raw.objectValue?["destination"]?.stringValue,
+                targetDescription: automationTargetDescription(task),
                 metadata: automationMetadataRows(task)
             )
         )
+    }
+
+    private func automationTargetDescription(_ task: CodexAutomationTaskSummary) -> String? {
+        guard let object = task.raw.objectValue else { return nil }
+        for key in ["destination", "target", "workspace", "project"] {
+            guard let value = object[key] else { continue }
+            if let string = value.stringValue, !string.isEmpty {
+                return string
+            }
+            if let nested = value.objectValue {
+                let candidates = ["name", "title", "path", "cwd", "id"]
+                for candidate in candidates {
+                    if let string = nested[candidate]?.stringValue, !string.isEmpty {
+                        return string
+                    }
+                }
+            }
+        }
+        return nil
     }
 
     private func automationStatus(_ status: String, isEnabled: Bool?) -> AutomationsFeatureView.AutomationStatus {

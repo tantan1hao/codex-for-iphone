@@ -124,7 +124,7 @@ struct AutomationsFeatureView: View {
             case .unsupported(let message):
                 NavigationStack {
                     AutomationsFeatureStatusView(
-                        icon: "bolt.horizontal.circle",
+                        icon: "clock.arrow.circlepath",
                         title: "暂不支持",
                         message: message,
                         actionTitle: "刷新",

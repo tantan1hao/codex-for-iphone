@@ -284,13 +284,16 @@ public struct CodexAutomationTaskSummary: Identifiable, Equatable, Sendable {
     }
 
     public static func parseListResponse(_ value: JSONValue) -> [CodexAutomationTaskSummary] {
-        CodexFeatureParsing.array(value, keys: ["data", "tasks", "items", "automations"])
+        CodexFeatureParsing.array(value, keys: ["data", "tasks", "items", "automations", "automationTasks", "automation_tasks"])
             .compactMap(parse)
     }
 
     public static func parseGetResponse(_ value: JSONValue) -> CodexAutomationTaskSummary? {
         if let task = value.objectValue?["task"] {
             return parse(task)
+        }
+        if let automation = value.objectValue?["automation"] {
+            return parse(automation)
         }
         if let data = value.objectValue?["data"] {
             return parse(data)
@@ -300,19 +303,24 @@ public struct CodexAutomationTaskSummary: Identifiable, Equatable, Sendable {
 
     public static func parse(_ value: JSONValue) -> CodexAutomationTaskSummary? {
         guard let object = value.objectValue else { return nil }
-        let id = CodexFeatureParsing.string(object, keys: ["id", "taskId", "taskID"]) ?? ""
-        let title = CodexFeatureParsing.string(object, keys: ["title", "name", "summary"]) ?? id
+        let id = CodexFeatureParsing.string(object, keys: [
+            "id", "taskId", "taskID", "task_id",
+            "automationId", "automationID", "automation_id", "key",
+        ]) ?? ""
+        let title = CodexFeatureParsing.string(object, keys: ["title", "name", "displayName", "label", "summary"]) ?? id
         return CodexAutomationTaskSummary(
             id: id,
             title: title,
-            status: CodexFeatureParsing.string(object, keys: ["status", "state"]) ?? "unknown",
-            schedule: CodexFeatureParsing.string(object, keys: ["schedule", "cron", "cadence"]),
-            prompt: CodexFeatureParsing.string(object, keys: ["prompt", "input", "description"]),
-            nextRunAt: CodexFeatureParsing.date(object, keys: ["nextRunAt", "next_run_at"]),
-            lastRunAt: CodexFeatureParsing.date(object, keys: ["lastRunAt", "last_run_at"]),
+            status: CodexFeatureParsing.string(object, keys: ["status", "state", "runStatus", "run_status"]) ?? "unknown",
+            schedule: CodexFeatureParsing.string(object, keys: [
+                "schedule", "scheduleDescription", "schedule_description", "cron", "cadence", "rrule",
+            ]),
+            prompt: CodexFeatureParsing.string(object, keys: ["prompt", "input", "instructions", "instruction", "description"]),
+            nextRunAt: CodexFeatureParsing.date(object, keys: ["nextRunAt", "next_run_at", "nextRun", "next_run"]),
+            lastRunAt: CodexFeatureParsing.date(object, keys: ["lastRunAt", "last_run_at", "lastRun", "last_run"]),
             createdAt: CodexFeatureParsing.date(object, keys: ["createdAt", "created_at"]),
             updatedAt: CodexFeatureParsing.date(object, keys: ["updatedAt", "updated_at"]),
-            isEnabled: CodexFeatureParsing.bool(object, keys: ["isEnabled", "enabled"]),
+            isEnabled: CodexFeatureParsing.bool(object, keys: ["isEnabled", "is_enabled", "enabled", "active"]),
             raw: value
         )
     }

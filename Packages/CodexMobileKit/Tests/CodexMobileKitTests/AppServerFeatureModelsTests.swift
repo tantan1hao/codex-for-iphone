@@ -122,6 +122,33 @@ final class AppServerFeatureModelsTests: XCTestCase {
         XCTAssertEqual(Int((try XCTUnwrap(usage.percentRemaining)).rounded()), 69)
     }
 
+    func testParsesAutomationTaskAliases() throws {
+        let value: JSONValue = [
+            "data": [
+                "automation_tasks": [
+                    [
+                        "automation_id": "auto_1",
+                        "displayName": "每日总结",
+                        "run_status": "scheduled",
+                        "schedule_description": "每天 09:00",
+                        "instructions": "总结昨天的变更",
+                        "next_run": "2026-04-30T01:00:00Z",
+                        "is_enabled": "true",
+                    ],
+                ],
+            ],
+        ]
+
+        let task = try XCTUnwrap(CodexAutomationTaskSummary.parseListResponse(value).first)
+        XCTAssertEqual(task.id, "auto_1")
+        XCTAssertEqual(task.title, "每日总结")
+        XCTAssertEqual(task.status, "scheduled")
+        XCTAssertEqual(task.schedule, "每天 09:00")
+        XCTAssertEqual(task.prompt, "总结昨天的变更")
+        XCTAssertEqual(task.isEnabled, true)
+        XCTAssertNotNil(task.nextRunAt)
+    }
+
     func testTokenUsageRejectsObjectsWithoutUsageFields() throws {
         XCTAssertNil(CodexTokenUsage.parse([
             "id": "thread-1",
