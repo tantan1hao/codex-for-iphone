@@ -44,7 +44,6 @@ private func applyThemeOverride(_ preference: ThemePreference) {
 
 enum MobileConnectionState: Equatable {
     case unpaired
-    case preview
     case connecting
     case connected
     case codexUnavailable(String)
@@ -55,7 +54,6 @@ enum MobileConnectionState: Equatable {
     var title: String {
         switch self {
         case .unpaired: "未配对"
-        case .preview: "界面预览"
         case .connecting: "连接中"
         case .connected: "已连接"
         case .codexUnavailable: "Codex 未启动"
@@ -68,7 +66,6 @@ enum MobileConnectionState: Equatable {
     var detail: String {
         switch self {
         case .unpaired: "扫描 Helper 二维码，或粘贴配对链接。"
-        case .preview: "当前是本地 UI 预览，不会连接电脑 Codex，也不会返回真实结果。"
         case .connecting: "正在打开 Codex 连接。"
         case .connected: "可以开始或继续一个 Codex 会话。"
         case let .codexUnavailable(message): message
@@ -81,7 +78,6 @@ enum MobileConnectionState: Equatable {
     var tint: Color {
         switch self {
         case .connected: .green
-        case .preview: .orange
         case .running, .connecting: .blue
         case .unpaired: .secondary
         case .codexUnavailable, .tokenRejected, .disconnected: .red
@@ -154,6 +150,7 @@ final class CodexMobileStore: ObservableObject {
     }
     @Published var selectedPermissionPreset: CodexPermissionPreset = .workspaceWrite
     @Published var isPlanModeEnabled = false
+    @Published private(set) var isRestoringSavedPairing = true
     @Published private(set) var collaborationModes: [CodexCollaborationMode] = []
     @Published private(set) var automationsState: AutomationsFeatureView.ContentState = .unsupported()
     @Published private(set) var contextUsageState: ContextUsageFeatureView.ContentState = .unsupported()
@@ -171,7 +168,6 @@ final class CodexMobileStore: ObservableObject {
     private var syncLoopTask: Task<Void, Never>?
     private var connectionGeneration = 0
     private var didAttemptRestore = false
-    private var isDesignPreviewMode = false
     private var oversizedHistoryThreadIDs = Set<String>()
     private var latestTokenUsage: CodexTokenUsage?
     private var contextCompactStatus: ContextUsageFeatureView.CompactStatus = .unavailable("等待 Codex 返回上下文用量。")
@@ -184,14 +180,12 @@ final class CodexMobileStore: ObservableObject {
 
     var canReconnect: Bool {
         pairing != nil &&
-            !isDesignPreviewMode &&
             connectionState != .connecting &&
             connectionState != .running
     }
 
     var canSendComposer: Bool {
         isConnected &&
-            !isDesignPreviewMode &&
             !conversation.isRunning &&
             !isSendingComposer &&
             !composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -300,8 +294,8 @@ final class CodexMobileStore: ObservableObject {
         }
     }
 
-    var isPreviewMode: Bool {
-        isDesignPreviewMode
+    var shouldShowWorkspace: Bool {
+        pairing != nil || isConnected
     }
 
     func activatePane(_ pane: WorkspacePane) {
@@ -324,8 +318,12 @@ final class CodexMobileStore: ObservableObject {
     }
 
     func restoreAndConnectIfNeeded() async {
-        guard !didAttemptRestore, pairing == nil else { return }
+        guard !didAttemptRestore, pairing == nil else {
+            isRestoringSavedPairing = false
+            return
+        }
         didAttemptRestore = true
+        defer { isRestoringSavedPairing = false }
         do {
             guard let savedPairing = try credentialStore.load() else { return }
             pairing = savedPairing
@@ -339,6 +337,7 @@ final class CodexMobileStore: ObservableObject {
     }
 
     func connectFromText() async {
+        isRestoringSavedPairing = false
         let payload: PairingPayload
         do {
             payload = try PairingPayload.parse(pairingText)
@@ -352,7 +351,7 @@ final class CodexMobileStore: ObservableObject {
     }
 
     func connect(_ payload: PairingPayload, persist: Bool = true) async throws {
-        isDesignPreviewMode = false
+        isRestoringSavedPairing = false
         connectionState = .connecting
         pairing = payload
         pairingText = payload.deepLinkURL.absoluteString
@@ -417,7 +416,6 @@ final class CodexMobileStore: ObservableObject {
     }
 
     func disconnect() {
-        isDesignPreviewMode = false
         invalidateCurrentConnection(emitDisconnectEvent: true)
         selectedThread = nil
         conversation = ConversationState()
@@ -448,6 +446,7 @@ final class CodexMobileStore: ObservableObject {
         try? credentialStore.delete()
         pairing = nil
         pairingText = ""
+        isRestoringSavedPairing = false
         activePane = .chat
         presentedToolPane = nil
         threads = []
@@ -468,42 +467,6 @@ final class CodexMobileStore: ObservableObject {
         historyNextCursor = nil
         historyContentNotice = nil
         connectionState = .unpaired
-    }
-
-    func loadDesignPreview() {
-        isDesignPreviewMode = true
-        invalidateCurrentConnection(emitDisconnectEvent: true)
-        let preview = CodexMobileStore.preview()
-        connectionState = .preview
-        pairingText = preview.pairingText
-        pairing = preview.pairing
-        activePane = .chat
-        threads = preview.threads
-        selectedThread = preview.selectedThread
-        conversation = preview.conversation
-        composerText = preview.composerText
-        isSendingComposer = false
-        isInterruptingTurn = false
-        isPlanModeEnabled = false
-        automationsState = .loaded(automations: [], lastUpdated: formattedNow())
-        latestTokenUsage = CodexTokenUsage(totalTokens: 62_400, tokenLimit: 200_000, raw: .object([:]))
-        contextCompactStatus = .available
-        updateContextUsageState()
-        answeringApprovalID = nil
-        answeringApprovalDecisionID = nil
-        isLoadingHistoryContent = false
-        isLoadingMoreHistory = false
-        historyNextCursor = nil
-        historyContentNotice = nil
-        isScannerPresented = false
-        isSidebarPresented = false
-        isSettingsPresented = false
-        presentedToolPane = nil
-        availableModels = preview.availableModels
-        selectedModelID = preview.selectedModelID
-        selectedReasoningEffort = preview.selectedReasoningEffort
-        selectedServiceTier = preview.selectedServiceTier
-        selectedPermissionPreset = preview.selectedPermissionPreset
     }
 
     func loadThreads() async throws {
@@ -533,7 +496,7 @@ final class CodexMobileStore: ObservableObject {
     }
 
     func refreshThreads() async {
-        guard isConnected, !isDesignPreviewMode else { return }
+        guard isConnected else { return }
         do {
             try await loadThreads()
         } catch {
@@ -544,21 +507,6 @@ final class CodexMobileStore: ObservableObject {
     func startNewThread() async {
         guard let pairing else { return }
         threadContentRefreshTask?.cancel()
-        if isDesignPreviewMode {
-            let thread = CodexThread(
-                id: "preview-\(UUID().uuidString)",
-                name: "新对话",
-                preview: "新对话",
-                cwd: pairing.cwd,
-                status: "loaded",
-                updatedAt: .now
-            )
-            selectedThread = thread
-            threads.insert(thread, at: 0)
-            conversation = ConversationState(threadID: thread.id)
-            historyContentNotice = nil
-            return
-        }
         do {
             let value = try await client.startThread(cwd: pairing.cwd, settings: currentSessionSettings)
             guard let thread = CodexThread.parseStartOrResumeResponse(value) else { return }
@@ -584,7 +532,7 @@ final class CodexMobileStore: ObservableObject {
         isLoadingHistoryContent = false
         isLoadingMoreHistory = false
         historyContentNotice = nil
-        guard isConnected, !isDesignPreviewMode else { return }
+        guard isConnected else { return }
         if oversizedHistoryThreadIDs.contains(thread.id) {
             historyContentNotice = .oversized
             conversation = ConversationState(threadID: thread.id)
@@ -723,7 +671,7 @@ final class CodexMobileStore: ObservableObject {
     func setShouldLoadHistoryContent(_ enabled: Bool) {
         shouldLoadHistoryContent = enabled
         guard let thread = selectedThread else { return }
-        if enabled, isConnected, !isDesignPreviewMode, conversation.items.isEmpty {
+        if enabled, isConnected, conversation.items.isEmpty {
             Task { await select(thread) }
         } else if !enabled, !conversation.isRunning {
             conversation = ConversationState(threadID: thread.id)
@@ -1076,7 +1024,6 @@ final class CodexMobileStore: ObservableObject {
     }
 
     private func scheduleThreadListRefresh(delay: Duration = .milliseconds(800)) {
-        guard !isDesignPreviewMode else { return }
         threadListRefreshTask?.cancel()
         threadListRefreshTask = Task { @MainActor in
             do {
@@ -1096,7 +1043,7 @@ final class CodexMobileStore: ObservableObject {
             while !Task.isCancelled {
                 do {
                     try await Task.sleep(for: .seconds(3))
-                    guard self.isConnected, !self.isDesignPreviewMode else { continue }
+                    guard self.isConnected else { continue }
                     try await self.loadThreads()
                     await self.refreshSelectedThreadContent()
                 } catch is CancellationError {
@@ -1112,7 +1059,6 @@ final class CodexMobileStore: ObservableObject {
         delay: Duration = .milliseconds(600),
         forceLatest: Bool = false
     ) {
-        guard !isDesignPreviewMode else { return }
         threadContentRefreshTask?.cancel()
         threadContentRefreshTask = Task { @MainActor in
             do {
@@ -1127,7 +1073,6 @@ final class CodexMobileStore: ObservableObject {
 
     private func refreshSelectedThreadContent(forceLatest: Bool = false) async {
         guard isConnected,
-              !isDesignPreviewMode,
               shouldLoadHistoryContent,
               !conversation.isRunning,
               !isLoadingHistoryContent,
@@ -1187,7 +1132,6 @@ final class CodexMobileStore: ObservableObject {
             connectionState = .unpaired
             return
         }
-        isDesignPreviewMode = false
         connectionState = .connecting
         let (generation, reconnectClient) = prepareClientForConnection()
         do {
@@ -1344,7 +1288,6 @@ final class CodexMobileStore: ObservableObject {
     }
 
     private func writeSessionSettings(edits: [(String, JSONValue)], rollback: @escaping () -> Void) async {
-        guard !isDesignPreviewMode else { return }
         isUpdatingSessionSettings = true
         defer { isUpdatingSessionSettings = false }
         do {
@@ -1394,7 +1337,7 @@ extension CodexMobileStore: TerminalFeatureActionProviding, WorkspaceFileDataSou
     }
 
     func refreshAutomations() async {
-        guard isConnected, !isDesignPreviewMode else {
+        guard isConnected else {
             automationsState = .unsupported(message: "请先连接 Codex app-server。")
             return
         }
@@ -1411,7 +1354,7 @@ extension CodexMobileStore: TerminalFeatureActionProviding, WorkspaceFileDataSou
     }
 
     func refreshContextUsage() async {
-        guard isConnected || isDesignPreviewMode else {
+        guard isConnected else {
             contextUsageState = .unsupported(message: "请先连接 Codex app-server。")
             return
         }
@@ -1419,7 +1362,7 @@ extension CodexMobileStore: TerminalFeatureActionProviding, WorkspaceFileDataSou
     }
 
     func requestContextCompact() async {
-        guard isConnected, !isDesignPreviewMode, let threadID = selectedThread?.id else {
+        guard isConnected, let threadID = selectedThread?.id else {
             contextCompactStatus = .unavailable("请先选择一个已连接的会话。")
             updateContextUsageState()
             return
@@ -1437,7 +1380,7 @@ extension CodexMobileStore: TerminalFeatureActionProviding, WorkspaceFileDataSou
     }
 
     func listDirectory(pairing: PairingPayload, relativePath: String) async throws -> WorkspaceDirectoryListing {
-        guard isConnected, !isDesignPreviewMode else {
+        guard isConnected else {
             throw WorkspaceFeatureError.notConnected
         }
         let sanitizedPath = sanitizedWorkspaceRelativePath(relativePath)
@@ -1450,7 +1393,7 @@ extension CodexMobileStore: TerminalFeatureActionProviding, WorkspaceFileDataSou
     }
 
     func loadFileData(pairing: PairingPayload, relativePath: String, byteLimit: Int) async throws -> Data {
-        guard isConnected, !isDesignPreviewMode else {
+        guard isConnected else {
             throw WorkspaceFeatureError.notConnected
         }
         let sanitizedPath = sanitizedWorkspaceRelativePath(relativePath)
@@ -1469,7 +1412,7 @@ extension CodexMobileStore: TerminalFeatureActionProviding, WorkspaceFileDataSou
     }
 
     private func runTerminalCommand(_ request: TerminalCommandRequest) async throws -> AsyncThrowingStream<TerminalCommandEvent, Error> {
-        guard isConnected, !isDesignPreviewMode else {
+        guard isConnected else {
             throw TerminalFeatureError.unsupported
         }
 
@@ -1751,7 +1694,8 @@ private enum WorkspaceFeatureError: LocalizedError {
 extension CodexMobileStore {
     static func preview() -> CodexMobileStore {
         let store = CodexMobileStore()
-        store.connectionState = .preview
+        store.connectionState = .connected
+        store.isRestoringSavedPairing = false
         let payload = try? PairingPayload(
             name: "Mac",
             host: "192.168.1.22",

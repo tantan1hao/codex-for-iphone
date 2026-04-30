@@ -178,11 +178,27 @@ private struct ChatPaneContentView: View {
     @EnvironmentObject private var store: CodexMobileStore
 
     var body: some View {
-        if store.isConnected || store.isPreviewMode {
+        if store.shouldShowWorkspace {
             CodexWorkspaceView()
+        } else if store.isRestoringSavedPairing {
+            RestoringConnectionView()
         } else {
             PairingView()
         }
+    }
+}
+
+private struct RestoringConnectionView: View {
+    var body: some View {
+        VStack(spacing: 16) {
+            ProgressView()
+                .tint(CodexTheme.blue)
+            Text("正在恢复连接")
+                .font(.headline.weight(.semibold))
+                .foregroundStyle(CodexTheme.text)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(CodexTheme.appBackground)
     }
 }
 
@@ -1069,14 +1085,12 @@ struct PairingView: View {
                 HStack {
                     scanButton
                     connectButton
-                    previewButton
                 }
                 VStack(spacing: 10) {
                     HStack {
                         scanButton
                         connectButton
                     }
-                    previewButton
                 }
             }
         }
@@ -1099,15 +1113,6 @@ struct PairingView: View {
             Label("连接", systemImage: "waveform.path.ecg")
         }
         .buttonStyle(CodexPrimaryButtonStyle())
-    }
-
-    private var previewButton: some View {
-        Button {
-            store.loadDesignPreview()
-        } label: {
-            Label("查看界面预览", systemImage: "rectangle.split.2x1")
-        }
-        .buttonStyle(CodexDarkButtonStyle())
     }
 }
 
@@ -1265,9 +1270,6 @@ struct WorkspaceHeader: View {
                 .font(.headline.weight(.semibold))
                 .foregroundStyle(CodexTheme.text)
                 .lineLimit(1)
-            if store.isPreviewMode {
-                previewBadge
-            }
             if let contextRemainingTitle = store.contextRemainingTitle {
                 contextBadge(contextRemainingTitle)
             }
@@ -1291,9 +1293,6 @@ struct WorkspaceHeader: View {
             Text(store.pairing?.name ?? "mac")
                 .font(.headline)
                 .foregroundStyle(CodexTheme.tertiaryText)
-            if store.isPreviewMode {
-                previewBadge
-            }
             if let contextRemainingTitle = store.contextRemainingTitle {
                 contextBadge(contextRemainingTitle)
             }
@@ -1305,15 +1304,6 @@ struct WorkspaceHeader: View {
             }
             Spacer()
         }
-    }
-
-    private var previewBadge: some View {
-        Text("预览")
-            .font(.caption2.weight(.bold))
-            .foregroundStyle(.orange)
-            .padding(.horizontal, 7)
-            .padding(.vertical, 3)
-            .background(.orange.opacity(0.16), in: Capsule())
     }
 
     private func contextBadge(_ title: String) -> some View {
