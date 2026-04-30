@@ -1145,7 +1145,11 @@ struct ConnectionStatusCard: View {
                     .foregroundStyle(CodexTheme.text)
                 Spacer()
             }
-            if store.pairing != nil {
+            if let pairing = store.pairing {
+                Text("当前设备：\(pairing.name)")
+                    .font(.caption)
+                    .foregroundStyle(CodexTheme.secondaryText)
+                    .lineLimit(1)
                 connectionActions
             } else {
                 Button {
