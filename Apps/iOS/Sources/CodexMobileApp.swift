@@ -145,6 +145,13 @@ final class CodexMobileStore: ObservableObject {
     @Published var availableModels: [CodexModelOption] = [.fallback]
     @Published var selectedModelID = CodexModelOption.fallback.model
     @Published var selectedReasoningEffort = "xhigh"
+    @Published var selectedServiceTier = CodexServiceTier(
+        rawValue: UserDefaults.standard.string(forKey: CodexMobileStore.serviceTierPreferenceKey) ?? ""
+    ) ?? .standard {
+        didSet {
+            UserDefaults.standard.set(selectedServiceTier.rawValue, forKey: Self.serviceTierPreferenceKey)
+        }
+    }
     @Published var selectedPermissionPreset: CodexPermissionPreset = .workspaceWrite
     @Published var isPlanModeEnabled = false
     @Published private(set) var collaborationModes: [CodexCollaborationMode] = []
@@ -153,6 +160,7 @@ final class CodexMobileStore: ObservableObject {
 
     private static let historyContentPreferenceKey = "CodexMobile.shouldLoadHistoryContent"
     private static let themePreferenceKey = "CodexMobile.themePreference"
+    private static let serviceTierPreferenceKey = "CodexMobile.serviceTier"
     private static let historyPageLimit = 1
     private static let selectedThreadSyncPageLimit = 3
     private let credentialStore = PairingCredentialStore()
@@ -232,6 +240,14 @@ final class CodexMobileStore: ObservableObject {
         return efforts.isEmpty ? ["medium", "high", "xhigh"] : efforts
     }
 
+    var availableServiceTiers: [CodexServiceTier] {
+        serviceTiers(for: selectedModel)
+    }
+
+    var activeServiceTier: CodexServiceTier {
+        availableServiceTiers.contains(selectedServiceTier) ? selectedServiceTier : .standard
+    }
+
     var modelStatusTitle: String {
         "\(shortModelName(selectedModel.displayName)) \(reasoningEffortTitle(selectedReasoningEffort))"
     }
@@ -246,6 +262,14 @@ final class CodexMobileStore: ObservableObject {
 
     var compactPermissionStatusTitle: String {
         selectedPermissionPreset.compactTitle
+    }
+
+    var serviceTierStatusTitle: String {
+        activeServiceTier.displayTitle
+    }
+
+    var compactServiceTierStatusTitle: String {
+        activeServiceTier.compactTitle
     }
 
     var planModeAvailable: Bool {
@@ -478,6 +502,7 @@ final class CodexMobileStore: ObservableObject {
         availableModels = preview.availableModels
         selectedModelID = preview.selectedModelID
         selectedReasoningEffort = preview.selectedReasoningEffort
+        selectedServiceTier = preview.selectedServiceTier
         selectedPermissionPreset = preview.selectedPermissionPreset
     }
 
@@ -712,11 +737,15 @@ final class CodexMobileStore: ObservableObject {
         guard canChangeSessionSettings else { return }
         let previous = selectedModelID
         let previousEffort = selectedReasoningEffort
+        let previousServiceTier = selectedServiceTier
         selectedModelID = model.model
         if !model.supportedReasoningEfforts.isEmpty,
            !model.supportedReasoningEfforts.contains(selectedReasoningEffort)
         {
             selectedReasoningEffort = model.defaultReasoningEffort ?? model.supportedReasoningEfforts.first ?? selectedReasoningEffort
+        }
+        if !serviceTiers(for: model).contains(selectedServiceTier) {
+            selectedServiceTier = .standard
         }
         await writeSessionSettings(
             edits: [
@@ -726,6 +755,7 @@ final class CodexMobileStore: ObservableObject {
             rollback: {
                 self.selectedModelID = previous
                 self.selectedReasoningEffort = previousEffort
+                self.selectedServiceTier = previousServiceTier
             }
         )
     }
@@ -755,6 +785,11 @@ final class CodexMobileStore: ObservableObject {
                 self.selectedPermissionPreset = previous
             }
         )
+    }
+
+    func changeServiceTier(to tier: CodexServiceTier) {
+        guard canChangeSessionSettings, availableServiceTiers.contains(tier) else { return }
+        selectedServiceTier = tier
     }
 
     func interrupt() async {
@@ -1224,7 +1259,8 @@ final class CodexMobileStore: ObservableObject {
         CodexSessionSettings(
             model: selectedModelID,
             reasoningEffort: selectedReasoningEffort,
-            permissionPreset: selectedPermissionPreset
+            permissionPreset: selectedPermissionPreset,
+            serviceTier: activeServiceTier
         )
     }
 
@@ -1286,6 +1322,14 @@ final class CodexMobileStore: ObservableObject {
             } else if let defaultEffort = selectedModel.defaultReasoningEffort {
                 selectedReasoningEffort = defaultEffort
             }
+            if let serviceTier = CodexServiceTier.fromConfig(
+                config["serviceTier"]
+                    ?? config["service_tier"]
+                    ?? config["default_service_tier"]
+                    ?? config["default-service-tier"]
+            ) {
+                selectedServiceTier = serviceTier
+            }
             selectedPermissionPreset = CodexPermissionPreset.fromConfig(
                 approvalPolicy: config["approval_policy"],
                 sandboxMode: config["sandbox_mode"]
@@ -1328,6 +1372,11 @@ final class CodexMobileStore: ObservableObject {
         case "xhigh": "超高"
         default: value
         }
+    }
+
+    private func serviceTiers(for model: CodexModelOption) -> [CodexServiceTier] {
+        let additionalTiers = Set(model.additionalSpeedTiers.map { $0.lowercased() })
+        return additionalTiers.contains(CodexServiceTier.fast.rawValue) ? [.standard, .fast] : [.standard]
     }
 }
 
@@ -1733,6 +1782,7 @@ extension CodexMobileStore {
                 displayName: "GPT-5.5",
                 defaultReasoningEffort: "xhigh",
                 supportedReasoningEfforts: ["medium", "high", "xhigh"],
+                additionalSpeedTiers: ["fast"],
                 isDefault: true
             ),
             CodexModelOption(
@@ -1740,11 +1790,13 @@ extension CodexMobileStore {
                 model: "gpt-5.4",
                 displayName: "GPT-5.4",
                 defaultReasoningEffort: "high",
-                supportedReasoningEfforts: ["medium", "high", "xhigh"]
+                supportedReasoningEfforts: ["medium", "high", "xhigh"],
+                additionalSpeedTiers: ["fast"]
             ),
         ]
         store.selectedModelID = "gpt-5.5"
         store.selectedReasoningEffort = "xhigh"
+        store.selectedServiceTier = .fast
         store.selectedPermissionPreset = .fullAccess
         return store
     }

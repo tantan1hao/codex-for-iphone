@@ -1879,6 +1879,7 @@ struct ComposerView: View {
         HStack(spacing: horizontalSizeClass == .compact ? 9 : 12) {
             permissionBadge
             modelBadge
+            speedBadge
             ComposerFeatureControls(
                 dictationState: dictationController.state,
                 isPlanModeEnabled: Binding(
@@ -1968,6 +1969,36 @@ struct ComposerView: View {
         .opacity(store.canChangeSessionSettings ? 1 : 0.62)
     }
 
+    private var speedBadge: some View {
+        Menu {
+            Section("速度") {
+                ForEach(CodexServiceTier.allCases) { tier in
+                    Button {
+                        store.changeServiceTier(to: tier)
+                    } label: {
+                        HStack {
+                            Label(tier.displayTitle, systemImage: tier.symbolName)
+                            if store.activeServiceTier == tier {
+                                Spacer()
+                                Image(systemName: "checkmark")
+                            }
+                        }
+                    }
+                    .disabled(!store.availableServiceTiers.contains(tier))
+                }
+            }
+        } label: {
+            let tier = store.activeServiceTier
+            statusIconChip(
+                icon: tier.symbolName,
+                tint: tier.tintColor
+            )
+            .accessibilityLabel("速度：\(store.serviceTierStatusTitle)")
+        }
+        .disabled(!store.canChangeSessionSettings)
+        .opacity(store.canChangeSessionSettings ? 1 : 0.62)
+    }
+
     private var modelBadge: some View {
         Menu {
             Section("模型") {
@@ -1997,8 +2028,7 @@ struct ComposerView: View {
                 }
             }
         } label: {
-            statusChip(
-                icon: "bolt.fill",
+            statusTextChip(
                 title: horizontalSizeClass == .compact ? store.compactModelStatusTitle : store.modelStatusTitle,
                 tint: CodexTheme.secondaryText
             )
@@ -2022,6 +2052,24 @@ struct ComposerView: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
         .background(CodexTheme.panel, in: Capsule())
+    }
+
+    private func statusTextChip(title: String, tint: Color) -> some View {
+        Text(title)
+            .font(.callout.weight(.bold))
+            .foregroundStyle(tint)
+            .lineLimit(1)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(CodexTheme.panel, in: Capsule())
+    }
+
+    private func statusIconChip(icon: String, tint: Color) -> some View {
+        Image(systemName: icon)
+            .font(.callout.weight(.bold))
+            .foregroundStyle(tint)
+            .frame(width: 36, height: 36)
+            .background(CodexTheme.panel, in: Capsule())
     }
 
     private func reasoningEffortTitle(_ value: String) -> String {
@@ -2061,6 +2109,22 @@ private extension CodexPermissionPreset {
         case .readOnly: CodexTheme.secondaryText
         case .workspaceWrite: CodexTheme.blue
         case .fullAccess: CodexTheme.orange
+        }
+    }
+}
+
+private extension CodexServiceTier {
+    var symbolName: String {
+        switch self {
+        case .standard: "speedometer"
+        case .fast: "bolt.fill"
+        }
+    }
+
+    var tintColor: Color {
+        switch self {
+        case .standard: CodexTheme.secondaryText
+        case .fast: CodexTheme.blue
         }
     }
 }

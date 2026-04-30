@@ -6,6 +6,7 @@ public struct CodexModelOption: Identifiable, Equatable, Sendable {
     public var displayName: String
     public var defaultReasoningEffort: String?
     public var supportedReasoningEfforts: [String]
+    public var additionalSpeedTiers: [String]
     public var isDefault: Bool
 
     public init(
@@ -14,6 +15,7 @@ public struct CodexModelOption: Identifiable, Equatable, Sendable {
         displayName: String,
         defaultReasoningEffort: String? = nil,
         supportedReasoningEfforts: [String] = [],
+        additionalSpeedTiers: [String] = [],
         isDefault: Bool = false
     ) {
         self.id = id
@@ -21,6 +23,7 @@ public struct CodexModelOption: Identifiable, Equatable, Sendable {
         self.displayName = displayName
         self.defaultReasoningEffort = defaultReasoningEffort
         self.supportedReasoningEfforts = supportedReasoningEfforts
+        self.additionalSpeedTiers = additionalSpeedTiers
         self.isDefault = isDefault
     }
 
@@ -30,6 +33,7 @@ public struct CodexModelOption: Identifiable, Equatable, Sendable {
         displayName: "GPT-5.5",
         defaultReasoningEffort: "xhigh",
         supportedReasoningEfforts: ["medium", "high", "xhigh"],
+        additionalSpeedTiers: ["fast"],
         isDefault: true
     )
 
@@ -47,14 +51,44 @@ public struct CodexModelOption: Identifiable, Equatable, Sendable {
         let effortOptions = object["supportedReasoningEfforts"]?.arrayValue?.compactMap { option in
             option.objectValue?["reasoningEffort"]?.stringValue
         } ?? []
+        let additionalSpeedTiers = object["additionalSpeedTiers"]?.arrayValue?.compactMap(\.stringValue)
+            ?? object["additional_speed_tiers"]?.arrayValue?.compactMap(\.stringValue)
+            ?? []
         return CodexModelOption(
             id: id,
             model: model,
             displayName: displayName,
             defaultReasoningEffort: object["defaultReasoningEffort"]?.stringValue,
             supportedReasoningEfforts: effortOptions,
+            additionalSpeedTiers: additionalSpeedTiers,
             isDefault: object["isDefault"]?.boolValue ?? false
         )
+    }
+}
+
+public enum CodexServiceTier: String, CaseIterable, Identifiable, Sendable {
+    case standard
+    case fast
+
+    public var id: String { rawValue }
+
+    public var displayTitle: String {
+        switch self {
+        case .standard: "标准"
+        case .fast: "快速"
+        }
+    }
+
+    public var compactTitle: String {
+        switch self {
+        case .standard: "标准"
+        case .fast: "快速"
+        }
+    }
+
+    public static func fromConfig(_ value: JSONValue?) -> CodexServiceTier? {
+        guard let rawValue = value?.stringValue else { return nil }
+        return CodexServiceTier(rawValue: rawValue)
     }
 }
 
@@ -154,10 +188,17 @@ public struct CodexSessionSettings: Equatable, Sendable {
     public var model: String?
     public var reasoningEffort: String?
     public var permissionPreset: CodexPermissionPreset
+    public var serviceTier: CodexServiceTier
 
-    public init(model: String?, reasoningEffort: String?, permissionPreset: CodexPermissionPreset) {
+    public init(
+        model: String?,
+        reasoningEffort: String?,
+        permissionPreset: CodexPermissionPreset,
+        serviceTier: CodexServiceTier = .standard
+    ) {
         self.model = model
         self.reasoningEffort = reasoningEffort
         self.permissionPreset = permissionPreset
+        self.serviceTier = serviceTier
     }
 }

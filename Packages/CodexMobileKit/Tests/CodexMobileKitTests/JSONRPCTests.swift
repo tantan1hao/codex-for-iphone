@@ -74,4 +74,41 @@ final class JSONRPCTests: XCTestCase {
         XCTAssertEqual(params?["threadId"]?.stringValue, "thr_1")
         XCTAssertEqual(params?["turnId"]?.stringValue, "turn_1")
     }
+
+    func testBuildsThreadStartParamsWithServiceTier() {
+        let settings = CodexSessionSettings(
+            model: "gpt-5.5",
+            reasoningEffort: "xhigh",
+            permissionPreset: .workspaceWrite,
+            serviceTier: .fast
+        )
+
+        let params = AppServerWebSocketClient.threadStartParams(cwd: "/Users/mac/CodexMobile", settings: settings).objectValue
+
+        XCTAssertEqual(params?["model"]?.stringValue, "gpt-5.5")
+        XCTAssertEqual(params?["serviceTier"]?.stringValue, "fast")
+        XCTAssertEqual(params?["config"]?.objectValue?["model_reasoning_effort"]?.stringValue, "xhigh")
+    }
+
+    func testBuildsTurnStartParamsWithServiceTier() {
+        let settings = CodexSessionSettings(
+            model: "gpt-5.5",
+            reasoningEffort: "high",
+            permissionPreset: .readOnly,
+            serviceTier: .standard
+        )
+
+        let params = AppServerWebSocketClient.turnStartParams(
+            threadID: "thr_1",
+            text: "hello",
+            cwd: "/Users/mac/CodexMobile",
+            settings: settings
+        ).objectValue
+
+        XCTAssertEqual(params?["threadId"]?.stringValue, "thr_1")
+        XCTAssertEqual(params?["model"]?.stringValue, "gpt-5.5")
+        XCTAssertEqual(params?["effort"]?.stringValue, "high")
+        XCTAssertEqual(params?["serviceTier"]?.stringValue, "standard")
+        XCTAssertEqual(params?["sandboxPolicy"]?.objectValue?["type"]?.stringValue, "readOnly")
+    }
 }

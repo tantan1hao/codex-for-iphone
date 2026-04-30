@@ -126,26 +126,12 @@ public extension AppServerWebSocketClient {
         settings: CodexSessionSettings,
         collaborationMode: CodexCollaborationMode?
     ) async throws -> JSONValue {
-        var params: [String: JSONValue] = [
-            "threadId": .string(threadID),
-            "cwd": .string(cwd),
-            "input": [
-                [
-                    "type": "text",
-                    "text": .string(text),
-                    "text_elements": [],
-                ],
-            ],
-            "approvalsReviewer": "user",
-            "approvalPolicy": settings.permissionPreset.approvalPolicy,
-            "sandboxPolicy": settings.permissionPreset.turnSandboxPolicy(cwd: cwd),
-        ]
-        if let model = settings.model {
-            params["model"] = .string(model)
-        }
-        if let reasoningEffort = settings.reasoningEffort {
-            params["effort"] = .string(reasoningEffort)
-        }
+        var params = AppServerWebSocketClient.turnStartParams(
+            threadID: threadID,
+            text: text,
+            cwd: cwd,
+            settings: settings
+        ).objectValue ?? [:]
         if let collaborationMode {
             params["collaborationMode"] = collaborationMode.wireValue
         }
