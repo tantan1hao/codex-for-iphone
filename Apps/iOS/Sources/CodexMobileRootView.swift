@@ -3,19 +3,57 @@ import SwiftUI
 import UIKit
 
 private enum CodexTheme {
-    static let appBackground = Color(red: 0.055, green: 0.055, blue: 0.055)
-    static let sidebarTop = Color(red: 0.16, green: 0.14, blue: 0.24)
-    static let sidebarBottom = Color(red: 0.10, green: 0.10, blue: 0.12)
-    static let panel = Color(red: 0.105, green: 0.105, blue: 0.105)
-    static let panelRaised = Color(red: 0.135, green: 0.135, blue: 0.135)
-    static let selected = Color.white.opacity(0.12)
-    static let separator = Color.white.opacity(0.07)
-    static let text = Color.white.opacity(0.92)
-    static let secondaryText = Color.white.opacity(0.55)
-    static let tertiaryText = Color.white.opacity(0.34)
+    static let appBackground = Color.dynamic(
+        light: UIColor(white: 0.98, alpha: 1),
+        dark: UIColor(red: 0.055, green: 0.055, blue: 0.055, alpha: 1)
+    )
+    static let sidebarTop = Color.dynamic(
+        light: UIColor(red: 0.93, green: 0.92, blue: 0.97, alpha: 1),
+        dark: UIColor(red: 0.16, green: 0.14, blue: 0.24, alpha: 1)
+    )
+    static let sidebarBottom = Color.dynamic(
+        light: UIColor(red: 0.96, green: 0.96, blue: 0.97, alpha: 1),
+        dark: UIColor(red: 0.10, green: 0.10, blue: 0.12, alpha: 1)
+    )
+    static let panel = Color.dynamic(
+        light: UIColor(white: 0.96, alpha: 1),
+        dark: UIColor(red: 0.105, green: 0.105, blue: 0.105, alpha: 1)
+    )
+    static let panelRaised = Color.dynamic(
+        light: UIColor.white,
+        dark: UIColor(red: 0.135, green: 0.135, blue: 0.135, alpha: 1)
+    )
+    static let selected = Color.dynamic(
+        light: UIColor.black.withAlphaComponent(0.08),
+        dark: UIColor.white.withAlphaComponent(0.12)
+    )
+    static let separator = Color.dynamic(
+        light: UIColor.black.withAlphaComponent(0.10),
+        dark: UIColor.white.withAlphaComponent(0.07)
+    )
+    static let text = Color.dynamic(
+        light: UIColor.black.withAlphaComponent(0.92),
+        dark: UIColor.white.withAlphaComponent(0.92)
+    )
+    static let secondaryText = Color.dynamic(
+        light: UIColor.black.withAlphaComponent(0.55),
+        dark: UIColor.white.withAlphaComponent(0.55)
+    )
+    static let tertiaryText = Color.dynamic(
+        light: UIColor.black.withAlphaComponent(0.40),
+        dark: UIColor.white.withAlphaComponent(0.34)
+    )
     static let green = Color(red: 0.18, green: 0.76, blue: 0.42)
     static let orange = Color(red: 1.0, green: 0.45, blue: 0.18)
     static let blue = Color(red: 0.36, green: 0.63, blue: 1.0)
+}
+
+private extension Color {
+    static func dynamic(light: UIColor, dark: UIColor) -> Color {
+        Color(uiColor: UIColor { trait in
+            trait.userInterfaceStyle == .dark ? dark : light
+        })
+    }
 }
 
 struct CodexMobileRootView: View {
@@ -30,7 +68,6 @@ struct CodexMobileRootView: View {
                 RegularCodexRoot()
             }
         }
-        .preferredColorScheme(.dark)
         .sheet(isPresented: $store.isScannerPresented) {
             QRScannerSheet { value in
                 store.pairingText = value
@@ -41,7 +78,6 @@ struct CodexMobileRootView: View {
         .sheet(isPresented: $store.isSettingsPresented) {
             SettingsView()
                 .presentationDetents([.medium])
-                .preferredColorScheme(.dark)
         }
     }
 }
@@ -489,7 +525,6 @@ struct PairingView: View {
             .padding()
         }
         .navigationTitle("Pair")
-        .toolbarColorScheme(.dark, for: .navigationBar)
     }
 
     private var pairingEditor: some View {
@@ -608,7 +643,6 @@ struct CodexWorkspaceView: View {
         }
         .background(CodexTheme.appBackground)
         .navigationBarTitleDisplayMode(.inline)
-        .toolbarColorScheme(.dark, for: .navigationBar)
     }
 
     private var transcriptScrollKey: String {
@@ -1171,7 +1205,7 @@ struct UserBubble: View {
                     .foregroundStyle(CodexTheme.text)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 12)
-                    .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 14))
+                    .background(CodexTheme.selected, in: RoundedRectangle(cornerRadius: 14))
                 if status == "failed" {
                     Label("发送失败，已恢复到输入框", systemImage: "exclamationmark.triangle.fill")
                         .font(.caption)
@@ -1397,7 +1431,7 @@ struct ComposerView: View {
                 } label: {
                     Image(systemName: "arrow.up")
                         .font(.headline.weight(.bold))
-                        .foregroundStyle(.black.opacity(store.canSendComposer ? 1 : 0.42))
+                        .foregroundStyle(CodexTheme.appBackground.opacity(store.canSendComposer ? 1 : 0.42))
                         .frame(width: 38, height: 38)
                         .background(sendButtonFill, in: Circle())
                 }
