@@ -125,6 +125,7 @@ final class CodexMobileStore: ObservableObject {
     private var threadListRefreshTask: Task<Void, Never>?
     private var threadContentRefreshTask: Task<Void, Never>?
     private var syncLoopTask: Task<Void, Never>?
+    private var connectionGeneration = 0
     private var didAttemptRestore = false
     private var isDesignPreviewMode = false
     private var oversizedHistoryThreadIDs = Set<String>()
@@ -228,6 +229,8 @@ final class CodexMobileStore: ObservableObject {
             pairing = savedPairing
             pairingText = savedPairing.deepLinkURL.absoluteString
             try await connect(savedPairing, persist: false)
+        } catch is CancellationError {
+            return
         } catch {
             connectionState = classifyConnectionError(error)
         }
@@ -266,20 +269,21 @@ final class CodexMobileStore: ObservableObject {
         if persist {
             try? credentialStore.save(payload)
         }
-        eventTask?.cancel()
-        threadListRefreshTask?.cancel()
-        threadContentRefreshTask?.cancel()
-        syncLoopTask?.cancel()
-        client.disconnect()
-        client = AppServerWebSocketClient()
-        observeEvents()
+        let (generation, connectionClient) = prepareClientForConnection()
         do {
-            try await client.connect(to: payload, appVersion: appVersion)
+            try await connectionClient.connect(to: payload, appVersion: appVersion)
+            try ensureCurrentConnection(generation: generation, client: connectionClient)
             connectionState = .connected
-            await refreshSessionConfiguration(cwd: payload.cwd)
-            try await loadThreads()
+            await refreshSessionConfiguration(cwd: payload.cwd, using: connectionClient, generation: generation)
+            try ensureCurrentConnection(generation: generation, client: connectionClient)
+            try await loadThreads(using: connectionClient, generation: generation)
+            try ensureCurrentConnection(generation: generation, client: connectionClient)
             startSyncLoop()
         } catch {
+            if !isCurrentConnection(generation: generation, client: connectionClient) {
+                connectionClient.disconnect(emitEvent: false)
+                throw CancellationError()
+            }
             connectionState = classifyConnectionError(error)
             throw error
         }
@@ -294,6 +298,8 @@ final class CodexMobileStore: ObservableObject {
             } else {
                 connectionState = .unpaired
             }
+        } catch is CancellationError {
+            return
         } catch {
             connectionState = classifyConnectionError(error)
         }
@@ -301,11 +307,7 @@ final class CodexMobileStore: ObservableObject {
 
     func disconnect() {
         isDesignPreviewMode = false
-        eventTask?.cancel()
-        threadListRefreshTask?.cancel()
-        threadContentRefreshTask?.cancel()
-        syncLoopTask?.cancel()
-        client.disconnect()
+        invalidateCurrentConnection(emitDisconnectEvent: true)
         selectedThread = nil
         conversation = ConversationState()
         isSendingComposer = false
@@ -341,11 +343,7 @@ final class CodexMobileStore: ObservableObject {
 
     func loadDesignPreview() {
         isDesignPreviewMode = true
-        eventTask?.cancel()
-        threadListRefreshTask?.cancel()
-        threadContentRefreshTask?.cancel()
-        syncLoopTask?.cancel()
-        client.disconnect()
+        invalidateCurrentConnection(emitDisconnectEvent: true)
         let preview = CodexMobileStore.preview()
         connectionState = .preview
         pairingText = preview.pairingText
@@ -372,7 +370,14 @@ final class CodexMobileStore: ObservableObject {
     }
 
     func loadThreads() async throws {
-        let value = try await client.listThreads()
+        try await loadThreads(using: client)
+    }
+
+    private func loadThreads(using loadingClient: AppServerWebSocketClient, generation: Int? = nil) async throws {
+        let value = try await loadingClient.listThreads()
+        if let generation {
+            try ensureCurrentConnection(generation: generation, client: loadingClient)
+        }
         let currentThreadID = selectedThread?.id
         let previousSelectedThread = selectedThread
         threads = CodexThread.parseListResponse(value)
@@ -499,6 +504,7 @@ final class CodexMobileStore: ObservableObject {
         }
         guard let threadID = selectedThread?.id else { return }
         let optimisticID = appendOptimisticUserMessage(threadID: threadID, text: text)
+        conversation.isRunning = true
         composerText = ""
         do {
             connectionState = .running
@@ -509,6 +515,8 @@ final class CodexMobileStore: ObservableObject {
             scheduleSelectedThreadContentRefresh(delay: .milliseconds(250), forceLatest: historyContentNotice == .oversized)
         } catch {
             removeOptimisticMessage(id: optimisticID)
+            conversation.isRunning = false
+            conversation.activeTurnID = nil
             if composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 composerText = text
             }
@@ -696,12 +704,48 @@ final class CodexMobileStore: ObservableObject {
         conversation.items.removeAll { $0.id == id }
     }
 
-    private func observeEvents() {
+    private func prepareClientForConnection() -> (generation: Int, client: AppServerWebSocketClient) {
+        connectionGeneration += 1
+        let generation = connectionGeneration
         eventTask?.cancel()
-        let observedClient = client
+        threadListRefreshTask?.cancel()
+        threadContentRefreshTask?.cancel()
+        syncLoopTask?.cancel()
+        client.disconnect(emitEvent: false)
+        let connectionClient = AppServerWebSocketClient()
+        client = connectionClient
+        observeEvents(for: connectionClient, generation: generation)
+        return (generation, connectionClient)
+    }
+
+    private func invalidateCurrentConnection(emitDisconnectEvent: Bool) {
+        connectionGeneration += 1
+        eventTask?.cancel()
+        threadListRefreshTask?.cancel()
+        threadContentRefreshTask?.cancel()
+        syncLoopTask?.cancel()
+        client.disconnect(emitEvent: emitDisconnectEvent)
+    }
+
+    private func isCurrentConnection(generation: Int, client observedClient: AppServerWebSocketClient) -> Bool {
+        connectionGeneration == generation && self.client === observedClient
+    }
+
+    private func ensureCurrentConnection(generation: Int, client observedClient: AppServerWebSocketClient) throws {
+        guard isCurrentConnection(generation: generation, client: observedClient) else {
+            observedClient.disconnect(emitEvent: false)
+            throw CancellationError()
+        }
+    }
+
+    private func observeEvents(for observedClient: AppServerWebSocketClient, generation: Int) {
+        eventTask?.cancel()
         eventTask = Task { @MainActor in
             for await event in observedClient.events {
-                guard self.client === observedClient else { continue }
+                guard self.isCurrentConnection(generation: generation, client: observedClient) else {
+                    observedClient.disconnect(emitEvent: false)
+                    return
+                }
                 syncThreadMetadata(from: event)
                 // Filter out events that belong to a different thread so
                 // a slow response from a previous thread can't corrupt
@@ -986,30 +1030,39 @@ final class CodexMobileStore: ObservableObject {
         }
         isDesignPreviewMode = false
         connectionState = .connecting
-        eventTask?.cancel()
-        threadListRefreshTask?.cancel()
-        threadContentRefreshTask?.cancel()
-        syncLoopTask?.cancel()
-        client.disconnect(emitEvent: false)
-        client = AppServerWebSocketClient()
-        observeEvents()
+        let (generation, reconnectClient) = prepareClientForConnection()
         do {
-            try await client.connect(to: payload, appVersion: appVersion)
+            try await reconnectClient.connect(to: payload, appVersion: appVersion)
+            try ensureCurrentConnection(generation: generation, client: reconnectClient)
             pairing = payload
             pairingText = payload.deepLinkURL.absoluteString
             connectionState = .connected
-            try? await loadThreads()
+            do {
+                try await loadThreads(using: reconnectClient, generation: generation)
+            } catch {
+                if error is CancellationError {
+                    throw error
+                }
+            }
+            try ensureCurrentConnection(generation: generation, client: reconnectClient)
             startSyncLoop()
             if let resumeThreadID, selectedThread?.id == resumeThreadID {
-                let value = try await client.resumeThread(id: resumeThreadID)
+                let value = try await reconnectClient.resumeThread(id: resumeThreadID)
+                try ensureCurrentConnection(generation: generation, client: reconnectClient)
                 if selectedThread?.id == resumeThreadID,
                    let resumedThread = CodexThread.parseStartOrResumeResponse(value)
                 {
                     selectedThread = mergeThread(existing: selectedThread ?? resumedThread, incoming: resumedThread)
                 }
             }
+        } catch is CancellationError {
+            reconnectClient.disconnect(emitEvent: false)
         } catch {
-            connectionState = classifyConnectionError(error)
+            if isCurrentConnection(generation: generation, client: reconnectClient) {
+                connectionState = classifyConnectionError(error)
+            } else {
+                reconnectClient.disconnect(emitEvent: false)
+            }
         }
     }
 
@@ -1051,19 +1104,32 @@ final class CodexMobileStore: ObservableObject {
         )
     }
 
-    private func refreshSessionConfiguration(cwd: String) async {
+    private func refreshSessionConfiguration(
+        cwd: String,
+        using configurationClient: AppServerWebSocketClient? = nil,
+        generation: Int? = nil
+    ) async {
+        let activeClient = configurationClient ?? client
+        func isStillCurrent() -> Bool {
+            guard let generation else { return true }
+            return isCurrentConnection(generation: generation, client: activeClient)
+        }
+
         do {
-            let modelValue = try await client.listModels()
+            let modelValue = try await activeClient.listModels()
+            guard isStillCurrent() else { return }
             let models = CodexModelOption.parseListResponse(modelValue)
             if !models.isEmpty {
                 availableModels = models.filter { !$0.displayName.isEmpty }
             }
         } catch {
+            guard isStillCurrent() else { return }
             availableModels = [.fallback]
         }
 
         do {
-            let configValue = try await client.readConfig(cwd: cwd)
+            let configValue = try await activeClient.readConfig(cwd: cwd)
+            guard isStillCurrent() else { return }
             let config = configValue.objectValue?["config"]?.objectValue ?? [:]
             if let model = config["model"]?.stringValue, !model.isEmpty {
                 selectedModelID = model
@@ -1091,6 +1157,7 @@ final class CodexMobileStore: ObservableObject {
                 sandboxMode: config["sandbox_mode"]
             )
         } catch {
+            guard isStillCurrent() else { return }
             if let defaultModel = availableModels.first(where: \.isDefault) ?? availableModels.first {
                 selectedModelID = defaultModel.model
                 selectedReasoningEffort = defaultModel.defaultReasoningEffort ?? selectedReasoningEffort

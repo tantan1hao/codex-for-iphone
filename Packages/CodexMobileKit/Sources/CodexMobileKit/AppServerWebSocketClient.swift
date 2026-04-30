@@ -5,6 +5,7 @@ public final class AppServerWebSocketClient {
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
     private var task: URLSessionWebSocketTask?
+    private var connectionGeneration = 0
     private var nextRequestID = 1
     private var pendingRequests: [JSONRPCID: CheckedContinuation<JSONValue, Error>] = [:]
     private let eventContinuation: AsyncStream<AppServerEvent>.Continuation
@@ -27,10 +28,13 @@ public final class AppServerWebSocketClient {
     }
 
     public func connect(to pairing: PairingPayload, appVersion: String) async throws {
+        connectionGeneration += 1
+        let generation = connectionGeneration
         let plan = pairing.connectionPlan
         if let readyzURL = plan.readyzURL {
             try await checkReady(url: readyzURL)
         }
+        try ensureConnectionIsCurrent(generation)
         connectionMode = pairing.connectionMode
         if plan.usesRemoteControlEnvelope {
             remoteControlClientID = "codex-mobile-\(UUID().uuidString)"
@@ -48,13 +52,21 @@ public final class AppServerWebSocketClient {
         socket.resume()
         if plan.registersRelay {
             try await registerRelay(pairing: pairing)
+            try ensureConnectionIsCurrent(generation)
         }
         startReceiveLoop()
         do {
             try await initialize(appVersion: appVersion)
+            try ensureConnectionIsCurrent(generation)
         } catch {
             disconnect(emitEvent: false)
             throw error
+        }
+    }
+
+    private func ensureConnectionIsCurrent(_ generation: Int) throws {
+        guard connectionGeneration == generation else {
+            throw CancellationError()
         }
     }
 
@@ -90,6 +102,7 @@ public final class AppServerWebSocketClient {
     public func checkReady(url: URL) async throws {
         var request = URLRequest(url: url)
         request.timeoutInterval = 2
+        request.setValue("close", forHTTPHeaderField: "Connection")
         let (_, response) = try await URLSession.shared.data(for: request)
         guard let httpResponse = response as? HTTPURLResponse else {
             throw AppServerClientError.transport("Codex app-server did not return an HTTP response.")
@@ -100,6 +113,7 @@ public final class AppServerWebSocketClient {
     }
 
     public func disconnect(emitEvent: Bool = true) {
+        connectionGeneration += 1
         task?.cancel(with: .goingAway, reason: nil)
         task = nil
         connectionMode = .direct
