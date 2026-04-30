@@ -88,7 +88,7 @@ public final class AppServerWebSocketClient {
                 "cwd": .string(pairing.cwd),
             ]
         )
-        try await socket.send(.string(CodexRelayWire.registrationString(registration)))
+        try await sendWebSocketMessage(.string(CodexRelayWire.registrationString(registration)), on: socket)
         let acknowledgement = try CodexRelayWire.acknowledgement(from: try await socket.receive())
         guard acknowledgement.type == "register_ack", acknowledgement.ok else {
             throw AppServerClientError.transport(acknowledgement.error ?? "Relay registration was rejected.")
@@ -318,7 +318,38 @@ public final class AppServerWebSocketClient {
         guard let rawMessage = String(data: data, encoding: .utf8) else {
             throw AppServerClientError.malformedMessage
         }
-        try await task.send(.string(rawMessage))
+        try await sendWebSocketMessage(.string(rawMessage), on: task)
+    }
+
+    private func sendWebSocketMessage(
+        _ message: URLSessionWebSocketTask.Message,
+        on socket: URLSessionWebSocketTask
+    ) async throws {
+        let retryDelays: [UInt64] = [0, 100_000_000, 250_000_000, 500_000_000]
+        var lastError: Error?
+        for delay in retryDelays {
+            if delay > 0 {
+                try await Task.sleep(nanoseconds: delay)
+            }
+            do {
+                try await socket.send(message)
+                return
+            } catch {
+                guard isTransientSocketNotConnected(error) else {
+                    throw error
+                }
+                lastError = error
+            }
+        }
+        throw lastError ?? AppServerClientError.notConnected
+    }
+
+    private func isTransientSocketNotConnected(_ error: Error) -> Bool {
+        let nsError = error as NSError
+        if nsError.domain == NSPOSIXErrorDomain && nsError.code == 57 {
+            return true
+        }
+        return nsError.localizedDescription.localizedCaseInsensitiveContains("Socket is not connected")
     }
 
     private func startReceiveLoop() {
@@ -349,7 +380,9 @@ public final class AppServerWebSocketClient {
         if let control = CodexRelayWire.control(from: webSocketMessage) {
             switch control.type {
             case "ping":
-                try await task?.send(CodexRelayWire.pongMessage())
+                if let task {
+                    try await sendWebSocketMessage(CodexRelayWire.pongMessage(), on: task)
+                }
                 return
             case "pong", "register_ack":
                 return
@@ -401,7 +434,7 @@ public final class AppServerWebSocketClient {
         guard let rawMessage = String(data: data, encoding: .utf8) else {
             throw AppServerClientError.malformedMessage
         }
-        try await task.send(.string(rawMessage))
+        try await sendWebSocketMessage(.string(rawMessage), on: task)
     }
 
     private func handle(jsonRPCMessage message: JSONRPCMessage) throws {

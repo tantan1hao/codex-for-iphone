@@ -84,7 +84,7 @@ public final class AppServerRelayBridge {
                 "localPort": .number(Double(pairing.port)),
             ]
         )
-        try await socket.send(.string(CodexRelayWire.registrationString(registration)))
+        try await sendWebSocketMessage(.string(CodexRelayWire.registrationString(registration)), on: socket)
         let acknowledgement = try CodexRelayWire.acknowledgement(from: try await socket.receive())
         guard acknowledgement.type == "register_ack", acknowledgement.ok else {
             throw AppServerClientError.transport(acknowledgement.error ?? "Relay registration was rejected.")
@@ -99,7 +99,7 @@ public final class AppServerRelayBridge {
                 if try await handleRelayControl(message, on: relayTask) {
                     continue
                 }
-                try await appServerTask.send(message)
+                try await sendWebSocketMessage(message, on: appServerTask)
             }
         } catch {
             stop()
@@ -111,7 +111,7 @@ public final class AppServerRelayBridge {
         do {
             while !Task.isCancelled {
                 let message = try await appServerTask.receive()
-                try await relayTask.send(message)
+                try await sendWebSocketMessage(message, on: relayTask)
             }
         } catch {
             stop()
@@ -122,7 +122,7 @@ public final class AppServerRelayBridge {
         guard let control = CodexRelayWire.control(from: message) else { return false }
         switch control.type {
         case "ping":
-            try await socket.send(CodexRelayWire.pongMessage())
+            try await sendWebSocketMessage(CodexRelayWire.pongMessage(), on: socket)
             return true
         case "pong", "register_ack":
             return true
@@ -131,5 +131,36 @@ public final class AppServerRelayBridge {
         default:
             return false
         }
+    }
+
+    private func sendWebSocketMessage(
+        _ message: URLSessionWebSocketTask.Message,
+        on socket: URLSessionWebSocketTask
+    ) async throws {
+        let retryDelays: [UInt64] = [0, 100_000_000, 250_000_000, 500_000_000]
+        var lastError: Error?
+        for delay in retryDelays {
+            if delay > 0 {
+                try await Task.sleep(nanoseconds: delay)
+            }
+            do {
+                try await socket.send(message)
+                return
+            } catch {
+                guard isTransientSocketNotConnected(error) else {
+                    throw error
+                }
+                lastError = error
+            }
+        }
+        throw lastError ?? AppServerClientError.notConnected
+    }
+
+    private func isTransientSocketNotConnected(_ error: Error) -> Bool {
+        let nsError = error as NSError
+        if nsError.domain == NSPOSIXErrorDomain && nsError.code == 57 {
+            return true
+        }
+        return nsError.localizedDescription.localizedCaseInsensitiveContains("Socket is not connected")
     }
 }
