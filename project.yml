@@ -59,6 +59,8 @@ targets:
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         UILaunchScreen: {}
         NSCameraUsageDescription: Codex Mobile uses the camera to scan pairing QR codes from your Mac.
+        NSSpeechRecognitionUsageDescription: Codex Mobile uses speech recognition to turn your voice into composer text.
+        NSMicrophoneUsageDescription: Codex Mobile uses the microphone for dictation in the composer.
         NSLocalNetworkUsageDescription: Codex Mobile connects to your Mac on the local network.
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true

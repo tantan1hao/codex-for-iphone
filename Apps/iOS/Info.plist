@@ -40,6 +40,10 @@
 	<string>Codex Mobile uses the camera to scan pairing QR codes from your Mac.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Codex Mobile connects to your Mac on the local network.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Codex Mobile uses the microphone for dictation in the composer.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Codex Mobile uses speech recognition to turn your voice into composer text.</string>
 	<key>UILaunchScreen</key>
 	<dict/>
 	<key>UISupportedInterfaceOrientations</key>
