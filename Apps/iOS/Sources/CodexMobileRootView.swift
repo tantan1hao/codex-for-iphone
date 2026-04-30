@@ -277,18 +277,63 @@ private struct WorkspacePaneHeader: View {
 
 private struct HeaderToolStrip: View {
     @EnvironmentObject private var store: CodexMobileStore
+    @State private var isContextInfoPresented = false
 
     var body: some View {
         HStack(spacing: 4) {
             ForEach(WorkspacePane.headerToolPanes) { pane in
                 HeaderToolButton(
                     pane: pane,
-                    isSelected: store.presentedToolPane == pane
+                    isSelected: isPaneSelected(pane)
                 ) {
-                    store.presentToolPane(pane)
+                    handleTap(pane)
+                }
+                .popover(
+                    isPresented: contextPopoverBinding(for: pane),
+                    attachmentAnchor: .rect(.bounds),
+                    arrowEdge: .top
+                ) {
+                    ContextUsageInfoPopover(state: store.contextUsageState)
+                        .task {
+                            await store.refreshContextUsage()
+                        }
+                        .presentationCompactAdaptation(.popover)
+                        .presentationBackground(CodexTheme.panel)
                 }
             }
         }
+    }
+
+    private func isPaneSelected(_ pane: WorkspacePane) -> Bool {
+        if pane == .context {
+            return isContextInfoPresented
+        }
+        return store.presentedToolPane == pane
+    }
+
+    private func handleTap(_ pane: WorkspacePane) {
+        if pane == .context {
+            store.presentedToolPane = nil
+            isContextInfoPresented.toggle()
+            if isContextInfoPresented {
+                Task { await store.refreshContextUsage() }
+            }
+        } else {
+            isContextInfoPresented = false
+            store.presentToolPane(pane)
+        }
+    }
+
+    private func contextPopoverBinding(for pane: WorkspacePane) -> Binding<Bool> {
+        Binding(
+            get: {
+                pane == .context && isContextInfoPresented
+            },
+            set: { newValue in
+                guard pane == .context else { return }
+                isContextInfoPresented = newValue
+            }
+        )
     }
 }
 
@@ -308,6 +353,117 @@ private struct HeaderToolButton: View {
         .foregroundStyle(isSelected ? CodexTheme.text : CodexTheme.secondaryText)
         .accessibilityLabel(pane.title)
         .accessibilityAddTraits(isSelected ? .isSelected : [])
+    }
+}
+
+private struct ContextUsageInfoPopover: View {
+    var state: ContextUsageFeatureView.ContentState
+
+    var body: some View {
+        VStack(spacing: 9) {
+            Text("背景信息窗口:")
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(CodexTheme.secondaryText)
+
+            switch state {
+            case .loaded(let snapshot):
+                Text(usagePercentLine(snapshot))
+                    .font(.title3.weight(.regular))
+                    .foregroundStyle(CodexTheme.text)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.78)
+
+                Text(tokenLine(snapshot))
+                    .font(.title3.weight(.regular))
+                    .foregroundStyle(CodexTheme.text)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.78)
+            case .loading:
+                Text("正在更新背景信息")
+                    .font(.title3.weight(.regular))
+                    .foregroundStyle(CodexTheme.text)
+                    .lineLimit(1)
+            case .unsupported:
+                Text("等待背景信息")
+                    .font(.title3.weight(.regular))
+                    .foregroundStyle(CodexTheme.text)
+                    .lineLimit(1)
+
+                Text("发送或恢复会话后更新")
+                    .font(.subheadline)
+                    .foregroundStyle(CodexTheme.secondaryText)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(1)
+            case .error:
+                Text("背景信息不可用")
+                    .font(.title3.weight(.regular))
+                    .foregroundStyle(CodexTheme.text)
+                    .lineLimit(1)
+
+                Text("请稍后重试")
+                    .font(.subheadline)
+                    .foregroundStyle(CodexTheme.secondaryText)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(1)
+            }
+
+            Text("Codex 自动压缩其背景信息")
+                .font(.headline.weight(.bold))
+                .foregroundStyle(CodexTheme.text)
+                .lineLimit(1)
+                .minimumScaleFactor(0.82)
+        }
+        .multilineTextAlignment(.center)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 14)
+        .frame(width: 270)
+        .background(CodexTheme.panel, in: RoundedRectangle(cornerRadius: 14))
+        .overlay {
+            RoundedRectangle(cornerRadius: 14)
+                .stroke(CodexTheme.separator, lineWidth: 1)
+        }
+    }
+
+    private func usagePercentLine(_ snapshot: ContextUsageFeatureView.Snapshot) -> String {
+        guard let usedFraction = snapshot.usedFraction,
+              let remainingFraction = snapshot.resolvedRemainingFraction
+        else {
+            return "等待 Codex 返回用量"
+        }
+        return "\(percentText(usedFraction)) 已用（剩余 \(percentText(remainingFraction))）"
+    }
+
+    private func tokenLine(_ snapshot: ContextUsageFeatureView.Snapshot) -> String {
+        guard let tokensInContext = snapshot.tokensInContext,
+              let contextWindow = snapshot.contextWindow
+        else {
+            return "token 用量等待更新"
+        }
+        return "已用 \(compactTokenCount(tokensInContext)) 标记，共 \(compactTokenCount(contextWindow))"
+    }
+
+    private func percentText(_ fraction: Double) -> String {
+        let clampedFraction = min(max(fraction, 0), 1)
+        return "\(Int((clampedFraction * 100).rounded()))%"
+    }
+
+    private func compactTokenCount(_ value: Int) -> String {
+        let absoluteValue = abs(value)
+        if absoluteValue >= 1_000_000 {
+            return "\(compactDecimal(Double(value) / 1_000_000))m"
+        }
+        if absoluteValue >= 1_000 {
+            return "\(Int((Double(value) / 1_000).rounded()))k"
+        }
+        return value.formatted(.number)
+    }
+
+    private func compactDecimal(_ value: Double) -> String {
+        let rounded = (value * 10).rounded() / 10
+        if rounded.rounded() == rounded {
+            return "\(Int(rounded))"
+        }
+        return String(format: "%.1f", rounded)
     }
 }
 
