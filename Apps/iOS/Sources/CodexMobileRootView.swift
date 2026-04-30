@@ -1941,19 +1941,28 @@ struct ComposerView: View {
                     Button {
                         Task { await store.changePermissionPreset(to: preset) }
                     } label: {
-                        if store.selectedPermissionPreset == preset {
-                            Label(preset.displayTitle, systemImage: "checkmark")
-                        } else {
-                            Text(preset.displayTitle)
+                        HStack {
+                            Label {
+                                Text(preset.displayTitle)
+                            } icon: {
+                                Image(systemName: preset.symbolName)
+                                    .foregroundStyle(preset.tintColor)
+                            }
+                            if store.selectedPermissionPreset == preset {
+                                Spacer()
+                                Image(systemName: "checkmark")
+                                    .foregroundStyle(preset.tintColor)
+                            }
                         }
                     }
+                    .tint(preset.tintColor)
                 }
             }
         } label: {
             statusChip(
-                icon: "exclamationmark.shield",
+                icon: store.selectedPermissionPreset.symbolName,
                 title: horizontalSizeClass == .compact ? store.compactPermissionStatusTitle : store.permissionStatusTitle,
-                tint: CodexTheme.orange
+                tint: store.selectedPermissionPreset.tintColor
             )
         }
         .disabled(!store.canChangeSessionSettings)
@@ -2044,6 +2053,16 @@ struct ComposerView: View {
         guard !transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         let separator = dictationBaseText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "" : " "
         store.composerText = dictationBaseText + separator + transcript
+    }
+}
+
+private extension CodexPermissionPreset {
+    var tintColor: Color {
+        switch self {
+        case .readOnly: CodexTheme.green
+        case .workspaceWrite: CodexTheme.blue
+        case .fullAccess: CodexTheme.orange
+        }
     }
 }
 

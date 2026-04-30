@@ -81,6 +81,14 @@ public enum CodexPermissionPreset: String, CaseIterable, Identifiable, Sendable 
         }
     }
 
+    public var symbolName: String {
+        switch self {
+        case .readOnly: "eye"
+        case .workspaceWrite: "square.and.pencil"
+        case .fullAccess: "exclamationmark.shield"
+        }
+    }
+
     public var detail: String {
         switch self {
         case .readOnly: "命令和写入会请求确认"
