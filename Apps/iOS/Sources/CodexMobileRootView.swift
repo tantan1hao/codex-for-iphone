@@ -1145,18 +1145,7 @@ struct ConnectionStatusCard: View {
                     .foregroundStyle(CodexTheme.text)
                 Spacer()
             }
-            Text(store.connectionState.detail)
-                .font(.caption)
-                .foregroundStyle(CodexTheme.secondaryText)
-            if let pairing = store.pairing {
-                Text("\(pairing.name)  \(pairing.connectionTargetDescription)")
-                    .font(.caption.monospaced())
-                    .foregroundStyle(CodexTheme.tertiaryText)
-                    .lineLimit(2)
-                Text(connectionModeText(for: pairing))
-                    .font(.caption)
-                    .foregroundStyle(pairing.connectionPlan.canRunWithoutDesktopAppChanges ? CodexTheme.secondaryText : CodexTheme.orange)
-                    .lineLimit(2)
+            if store.pairing != nil {
                 connectionActions
             } else {
                 Button {
@@ -1188,17 +1177,6 @@ struct ConnectionStatusCard: View {
             }
             .buttonStyle(CodexDarkButtonStyle())
             .disabled(!store.isConnected)
-        }
-    }
-
-    private func connectionModeText(for pairing: PairingPayload) -> String {
-        return switch pairing.connectionPlan.transport {
-        case .helperLAN:
-            "Helper LAN：不改桌面 Codex，Mac Helper 启动独立 app-server。"
-        case .helperRelay:
-            "Helper Relay：不改桌面 Codex，通过中继连接 Helper app-server。"
-        case .desktopRemoteControl:
-            "Desktop Remote Control：需要桌面 Codex 开启 remote_control。"
         }
     }
 }
