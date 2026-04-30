@@ -62,6 +62,66 @@ final class AppServerFeatureModelsTests: XCTestCase {
         XCTAssertEqual(Int((try XCTUnwrap(usage.percentRemaining)).rounded()), 69)
     }
 
+    func testParsesAppServerThreadTokenUsageNotification() throws {
+        let value: JSONValue = [
+            "threadId": "thr_1",
+            "turnId": "turn_1",
+            "tokenUsage": [
+                "total": [
+                    "totalTokens": 80_000,
+                    "inputTokens": 70_000,
+                    "cachedInputTokens": 10_000,
+                    "outputTokens": 9_000,
+                    "reasoningOutputTokens": 1_000,
+                ],
+                "last": [
+                    "totalTokens": 12_000,
+                    "inputTokens": 10_000,
+                    "cachedInputTokens": 2_000,
+                    "outputTokens": 1_500,
+                    "reasoningOutputTokens": 500,
+                ],
+                "modelContextWindow": 258_000,
+            ],
+        ]
+
+        let usage = try XCTUnwrap(CodexTokenUsage.find(in: value))
+        XCTAssertEqual(usage.totalTokens, 80_000)
+        XCTAssertEqual(usage.inputTokens, 70_000)
+        XCTAssertEqual(usage.cachedInputTokens, 10_000)
+        XCTAssertEqual(usage.outputTokens, 9_000)
+        XCTAssertEqual(usage.reasoningOutputTokens, 1_000)
+        XCTAssertEqual(usage.tokenLimit, 258_000)
+        XCTAssertEqual(Int((try XCTUnwrap(usage.percentRemaining)).rounded()), 69)
+    }
+
+    func testParsesCoreTokenUsageInfoShape() throws {
+        let value: JSONValue = [
+            "info": [
+                "total_token_usage": [
+                    "total_tokens": 31_000,
+                    "input_tokens": 28_000,
+                    "cached_input_tokens": 4_000,
+                    "output_tokens": 2_500,
+                    "reasoning_output_tokens": 500,
+                ],
+                "last_token_usage": [
+                    "total_tokens": 4_000,
+                    "input_tokens": 3_000,
+                    "cached_input_tokens": 500,
+                    "output_tokens": 750,
+                    "reasoning_output_tokens": 250,
+                ],
+                "model_context_window": 100_000,
+            ],
+        ]
+
+        let usage = try XCTUnwrap(CodexTokenUsage.find(in: value))
+        XCTAssertEqual(usage.totalTokens, 31_000)
+        XCTAssertEqual(usage.tokenLimit, 100_000)
+        XCTAssertEqual(Int((try XCTUnwrap(usage.percentRemaining)).rounded()), 69)
+    }
+
     func testTokenUsageRejectsObjectsWithoutUsageFields() throws {
         XCTAssertNil(CodexTokenUsage.parse([
             "id": "thread-1",

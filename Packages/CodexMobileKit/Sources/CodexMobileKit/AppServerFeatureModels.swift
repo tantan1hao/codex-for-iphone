@@ -99,70 +99,44 @@ public struct CodexTokenUsage: Equatable, Sendable {
     }
 
     public var percentRemaining: Double? {
+        percentRemaining(fallbackTokenLimit: nil)
+    }
+
+    public func percentRemaining(fallbackTokenLimit: Int?) -> Double? {
         if let reportedPercentRemaining {
             return Self.normalizedPercent(reportedPercentRemaining)
         }
-        guard let tokenLimit, tokenLimit > 0 else { return nil }
+        let effectiveTokenLimit = tokenLimit ?? fallbackTokenLimit
+        guard let effectiveTokenLimit, effectiveTokenLimit > 0 else { return nil }
         if let remainingTokens {
-            return Self.clampedPercent(Double(remainingTokens) / Double(tokenLimit) * 100)
+            return Self.clampedPercent(Double(remainingTokens) / Double(effectiveTokenLimit) * 100)
         }
-        let remaining = tokenLimit - totalTokens
-        return Self.clampedPercent(Double(remaining) / Double(tokenLimit) * 100)
+        let remaining = effectiveTokenLimit - totalTokens
+        return Self.clampedPercent(Double(remaining) / Double(effectiveTokenLimit) * 100)
     }
 
     public static func parse(_ value: JSONValue) -> CodexTokenUsage? {
         guard let object = CodexFeatureParsing.object(value, unwrapping: [
-            "usage", "tokenUsage", "token_usage", "tokens",
+            "usage", "tokenUsage", "token_usage", "tokens", "info",
             "contextUsage", "context_usage", "data",
         ]) else {
             return nil
         }
-        let inputTokens = CodexFeatureParsing.int(object, keys: ["inputTokens", "input_tokens", "promptTokens", "prompt_tokens"])
-        let cachedInputTokens = CodexFeatureParsing.int(object, keys: ["cachedInputTokens", "cached_input_tokens", "cachedTokens", "cached_tokens"])
-        let outputTokens = CodexFeatureParsing.int(object, keys: ["outputTokens", "output_tokens", "completionTokens", "completion_tokens"])
-        let reasoningOutputTokens = CodexFeatureParsing.int(object, keys: ["reasoningOutputTokens", "reasoning_output_tokens", "reasoningTokens", "reasoning_tokens"])
-        let explicitTotalTokens = CodexFeatureParsing.int(object, keys: [
-            "totalTokens", "total_tokens", "total", "tokens",
-            "usedTokens", "used_tokens", "tokensUsed", "tokens_used",
-            "contextTokens", "context_tokens", "tokensInContext", "tokens_in_context",
-        ])
         let tokenLimit = CodexFeatureParsing.int(object, keys: [
             "tokenLimit", "token_limit", "contextWindow", "context_window",
+            "modelContextWindow", "model_context_window",
             "contextLimit", "context_limit", "maxTokens", "max_tokens",
             "maxContextTokens", "max_context_tokens", "limit",
         ])
-        let remainingTokens = CodexFeatureParsing.int(object, keys: [
-            "remainingTokens", "remaining_tokens", "tokensRemaining", "tokens_remaining",
-            "remaining", "remainingContextTokens", "remaining_context_tokens",
-        ])
-        let reportedPercentRemaining = CodexFeatureParsing.double(object, keys: [
-            "percentRemaining", "percent_remaining", "remainingPercent", "remaining_percent",
-            "remainingPct", "remaining_pct",
-        ])
-        let hasUsageSignal = [
-            inputTokens,
-            cachedInputTokens,
-            outputTokens,
-            reasoningOutputTokens,
-            explicitTotalTokens,
-            tokenLimit,
-            remainingTokens,
-        ].contains { $0 != nil } || reportedPercentRemaining != nil
-        guard hasUsageSignal else { return nil }
-
-        let totalTokens = explicitTotalTokens
-            ?? [inputTokens, cachedInputTokens, outputTokens, reasoningOutputTokens].compactMap { $0 }.reduce(0, +)
-        return CodexTokenUsage(
-            inputTokens: inputTokens,
-            cachedInputTokens: cachedInputTokens,
-            outputTokens: outputTokens,
-            reasoningOutputTokens: reasoningOutputTokens,
-            totalTokens: totalTokens,
-            tokenLimit: tokenLimit,
-            remainingTokens: remainingTokens,
-            reportedPercentRemaining: reportedPercentRemaining,
-            raw: value
-        )
+        if let totalObject = firstObject(
+            in: object,
+            keys: ["total", "totalTokenUsage", "total_token_usage", "totalUsage", "total_usage"]
+        ),
+            let usage = parseBreakdown(totalObject, tokenLimit: tokenLimit, raw: value)
+        {
+            return usage
+        }
+        return parseBreakdown(object, tokenLimit: tokenLimit, raw: value)
     }
 
     public static func find(in value: JSONValue) -> CodexTokenUsage? {
@@ -173,7 +147,7 @@ public struct CodexTokenUsage: Equatable, Sendable {
         case let .object(object):
             let preferredKeys = [
                 "usage", "tokenUsage", "token_usage", "tokens",
-                "contextUsage", "context_usage", "context",
+                "contextUsage", "context_usage", "context", "info",
                 "metrics", "stats", "data", "turn", "thread", "response",
             ]
             for key in preferredKeys {
@@ -194,6 +168,69 @@ public struct CodexTokenUsage: Equatable, Sendable {
             }
         case .null, .bool, .number, .string:
             break
+        }
+        return nil
+    }
+
+    private static func parseBreakdown(
+        _ object: [String: JSONValue],
+        tokenLimit: Int?,
+        raw: JSONValue
+    ) -> CodexTokenUsage? {
+        let inputTokens = CodexFeatureParsing.int(object, keys: ["inputTokens", "input_tokens", "promptTokens", "prompt_tokens"])
+        let cachedInputTokens = CodexFeatureParsing.int(object, keys: ["cachedInputTokens", "cached_input_tokens", "cachedTokens", "cached_tokens"])
+        let outputTokens = CodexFeatureParsing.int(object, keys: ["outputTokens", "output_tokens", "completionTokens", "completion_tokens"])
+        let reasoningOutputTokens = CodexFeatureParsing.int(object, keys: ["reasoningOutputTokens", "reasoning_output_tokens", "reasoningTokens", "reasoning_tokens"])
+        let explicitTotalTokens = CodexFeatureParsing.int(object, keys: [
+            "totalTokens", "total_tokens", "total", "tokens",
+            "usedTokens", "used_tokens", "tokensUsed", "tokens_used",
+            "contextTokens", "context_tokens", "tokensInContext", "tokens_in_context",
+        ])
+        let localTokenLimit = CodexFeatureParsing.int(object, keys: [
+            "tokenLimit", "token_limit", "contextWindow", "context_window",
+            "modelContextWindow", "model_context_window",
+            "contextLimit", "context_limit", "maxTokens", "max_tokens",
+            "maxContextTokens", "max_context_tokens", "limit",
+        ]) ?? tokenLimit
+        let remainingTokens = CodexFeatureParsing.int(object, keys: [
+            "remainingTokens", "remaining_tokens", "tokensRemaining", "tokens_remaining",
+            "remaining", "remainingContextTokens", "remaining_context_tokens",
+        ])
+        let reportedPercentRemaining = CodexFeatureParsing.double(object, keys: [
+            "percentRemaining", "percent_remaining", "remainingPercent", "remaining_percent",
+            "remainingPct", "remaining_pct",
+        ])
+        let hasUsageSignal = [
+            inputTokens,
+            cachedInputTokens,
+            outputTokens,
+            reasoningOutputTokens,
+            explicitTotalTokens,
+            localTokenLimit,
+            remainingTokens,
+        ].contains { $0 != nil } || reportedPercentRemaining != nil
+        guard hasUsageSignal else { return nil }
+
+        let totalTokens = explicitTotalTokens
+            ?? [inputTokens, cachedInputTokens, outputTokens, reasoningOutputTokens].compactMap { $0 }.reduce(0, +)
+        return CodexTokenUsage(
+            inputTokens: inputTokens,
+            cachedInputTokens: cachedInputTokens,
+            outputTokens: outputTokens,
+            reasoningOutputTokens: reasoningOutputTokens,
+            totalTokens: totalTokens,
+            tokenLimit: localTokenLimit,
+            remainingTokens: remainingTokens,
+            reportedPercentRemaining: reportedPercentRemaining,
+            raw: raw
+        )
+    }
+
+    private static func firstObject(in object: [String: JSONValue], keys: [String]) -> [String: JSONValue]? {
+        for key in keys {
+            if let nested = object[key]?.objectValue {
+                return nested
+            }
         }
         return nil
     }
