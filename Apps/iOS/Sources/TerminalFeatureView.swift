@@ -21,6 +21,10 @@ struct TerminalFeatureView: View {
             header
             Divider()
             outputPane
+            if state.isRunning {
+                Divider()
+                stdinBar
+            }
             Divider()
             commandBar
         }
@@ -79,6 +83,15 @@ struct TerminalFeatureView: View {
             .textSelection(.enabled)
             .scrollDismissesKeyboard(.interactively)
             .background(TerminalColors.outputBackground)
+            .background {
+                GeometryReader { geo in
+                    Color.clear
+                        .onAppear { reportMetrics(geometrySize: geo.size) }
+                        .onChange(of: geo.size) { _, newValue in
+                            reportMetrics(geometrySize: newValue)
+                        }
+                }
+            }
             .onChange(of: state.scrollAnchorID) { _, anchorID in
                 guard let anchorID else { return }
                 withAnimation(.snappy(duration: 0.18)) {
@@ -86,6 +99,82 @@ struct TerminalFeatureView: View {
                 }
             }
         }
+    }
+
+    private var stdinBar: some View {
+        HStack(spacing: 8) {
+            TextField("Send to stdin", text: $state.stdinText, axis: .horizontal)
+                .font(.system(.callout, design: .monospaced))
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .submitLabel(.send)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 9)
+                .background(TerminalColors.field, in: RoundedRectangle(cornerRadius: 8))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(TerminalColors.separator, lineWidth: 1)
+                }
+                .onSubmit { sendStdin() }
+                .disabled(!state.canSendStdin)
+
+            Button {
+                sendStdin()
+            } label: {
+                Image(systemName: "arrow.up.circle.fill")
+                    .font(.title2)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(CodexTheme.blue)
+            .disabled(!state.canSendStdin)
+            .accessibilityLabel("Send to stdin")
+
+            Menu {
+                Button {
+                    Task { await state.sendInterrupt(actions: actions) }
+                } label: {
+                    Label("Send Ctrl-C", systemImage: "bolt.slash")
+                }
+                Button {
+                    Task { await state.sendEOF(actions: actions) }
+                } label: {
+                    Label("Send EOF (Ctrl-D)", systemImage: "stop.circle")
+                }
+            } label: {
+                Image(systemName: "ellipsis.circle")
+                    .font(.title3)
+                    .foregroundStyle(CodexTheme.secondaryText)
+                    .frame(width: 30, height: 30)
+            }
+            .disabled(!state.canSendStdin)
+            .accessibilityLabel("More stdin actions")
+        }
+        .padding(.horizontal, horizontalSizeClass == .compact ? 12 : 18)
+        .padding(.vertical, 10)
+        .background(TerminalColors.panel)
+    }
+
+    private func sendStdin() {
+        Task { await state.sendStdin(actions: actions) }
+    }
+
+    private func reportMetrics(geometrySize size: CGSize) {
+        guard size.width > 0, size.height > 0 else { return }
+        let inset = CGFloat(horizontalSizeClass == .compact ? 14 : 18)
+        let usableWidth = max(size.width - inset * 2, 0)
+        let usableHeight = max(size.height - inset * 2, 0)
+        let cell = TerminalFeatureView.cellSize()
+        guard cell.width > 0, cell.height > 0 else { return }
+        let cols = max(Int((usableWidth / cell.width).rounded(.down)), 1)
+        let rows = max(Int((usableHeight / cell.height).rounded(.down)), 1)
+        Task { await state.updateLayoutMetrics(cols: cols, rows: rows, actions: actions) }
+    }
+
+    private static func cellSize() -> CGSize {
+        let baseFont = UIFont.preferredFont(forTextStyle: .callout)
+        let monoFont = UIFont.monospacedSystemFont(ofSize: baseFont.pointSize, weight: .regular)
+        let charWidth = ("M" as NSString).size(withAttributes: [.font: monoFont]).width
+        return CGSize(width: charWidth, height: monoFont.lineHeight)
     }
 
     private var commandBar: some View {
@@ -240,13 +329,19 @@ protocol TerminalFeatureActionProviding: AnyObject {
 struct TerminalFeatureActions {
     var run: @Sendable @MainActor (TerminalCommandRequest) async throws -> AsyncThrowingStream<TerminalCommandEvent, Error>
     var stop: @Sendable @MainActor () async -> Void
+    var write: @Sendable @MainActor (String, Bool) async -> Void
+    var resize: @Sendable @MainActor (Int, Int) async -> Void
 
     init(
         run: @escaping @Sendable @MainActor (TerminalCommandRequest) async throws -> AsyncThrowingStream<TerminalCommandEvent, Error>,
-        stop: @escaping @Sendable @MainActor () async -> Void = {}
+        stop: @escaping @Sendable @MainActor () async -> Void = {},
+        write: @escaping @Sendable @MainActor (String, Bool) async -> Void = { _, _ in },
+        resize: @escaping @Sendable @MainActor (Int, Int) async -> Void = { _, _ in }
     ) {
         self.run = run
         self.stop = stop
+        self.write = write
+        self.resize = resize
     }
 
     static let unsupported = TerminalFeatureActions(
@@ -259,6 +354,8 @@ struct TerminalFeatureActions {
 struct TerminalCommandRequest: Equatable, Sendable {
     var command: String
     var cwd: String
+    var cols: Int?
+    var rows: Int?
 }
 
 enum TerminalCommandEvent: Equatable, Sendable {
@@ -282,11 +379,16 @@ enum TerminalFeatureError: LocalizedError, Sendable {
 @MainActor
 final class TerminalFeatureState: ObservableObject {
     @Published var commandText = ""
+    @Published var stdinText = ""
     @Published private(set) var workingDirectory = ""
     @Published private(set) var lines: [TerminalOutputLine] = []
     @Published private(set) var status: TerminalRunStatus = .idle
+    @Published private(set) var pendingCols: Int?
+    @Published private(set) var pendingRows: Int?
 
     private var runTask: Task<Void, Never>?
+    private var lastSentCols: Int?
+    private var lastSentRows: Int?
 
     var canRun: Bool {
         !trimmedCommand.isEmpty && !status.isBusy
@@ -294,6 +396,15 @@ final class TerminalFeatureState: ObservableObject {
 
     var canStop: Bool {
         status.isBusy
+    }
+
+    var isRunning: Bool {
+        if case .running = status { return true }
+        return false
+    }
+
+    var canSendStdin: Bool {
+        isRunning
     }
 
     var displayWorkingDirectory: String {
@@ -325,7 +436,16 @@ final class TerminalFeatureState: ObservableObject {
         append(command, stream: .interaction, prefix: "$")
         commandText = ""
 
-        let request = TerminalCommandRequest(command: command, cwd: workingDirectory)
+        let request = TerminalCommandRequest(
+            command: command,
+            cwd: workingDirectory,
+            cols: pendingCols,
+            rows: pendingRows
+        )
+        if let cols = pendingCols, let rows = pendingRows {
+            lastSentCols = cols
+            lastSentRows = rows
+        }
         runTask?.cancel()
         runTask = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -340,6 +460,38 @@ final class TerminalFeatureState: ObservableObject {
         runTask?.cancel()
         await actions.stop()
         status = .idle
+    }
+
+    func sendStdin(actions: TerminalFeatureActions, appendNewline: Bool = true) async {
+        guard isRunning else { return }
+        let raw = stdinText
+        let payload = appendNewline ? raw + "\n" : raw
+        stdinText = ""
+        append(raw.isEmpty ? "(empty)" : raw, stream: .interaction, prefix: ">")
+        await actions.write(payload, false)
+    }
+
+    func sendInterrupt(actions: TerminalFeatureActions) async {
+        guard isRunning else { return }
+        append("^C", stream: .interaction, prefix: nil)
+        await actions.write("\u{03}", false)
+    }
+
+    func sendEOF(actions: TerminalFeatureActions) async {
+        guard isRunning else { return }
+        append("EOF", stream: .interaction, prefix: nil)
+        await actions.write("", true)
+    }
+
+    func updateLayoutMetrics(cols: Int, rows: Int, actions: TerminalFeatureActions) async {
+        guard cols > 0, rows > 0 else { return }
+        pendingCols = cols
+        pendingRows = rows
+        guard isRunning else { return }
+        if lastSentCols == cols, lastSentRows == rows { return }
+        lastSentCols = cols
+        lastSentRows = rows
+        await actions.resize(cols, rows)
     }
 
     func clear() {
@@ -580,7 +732,7 @@ private struct TerminalPlaceholderView: View {
             Text("No terminal output yet.")
                 .font(.callout.weight(.semibold))
                 .foregroundStyle(CodexTheme.text)
-            Text("Run a command after the app-server command/exec hook is wired.")
+            Text("Type a command above and press Run to execute it on the paired Mac.")
                 .font(.caption)
                 .foregroundStyle(CodexTheme.secondaryText)
         }
