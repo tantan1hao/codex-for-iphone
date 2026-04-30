@@ -9,6 +9,9 @@ enum WorkspacePane: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
+    static let sidebarPanes: [WorkspacePane] = [.chat, .automations]
+    static let headerToolPanes: [WorkspacePane] = [.terminal, .files, .context]
+
     var title: String {
         switch self {
         case .chat: "聊天"

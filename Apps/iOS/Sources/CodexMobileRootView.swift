@@ -26,6 +26,10 @@ struct CodexMobileRootView: View {
             SettingsView()
                 .presentationDetents([.medium, .large])
         }
+        .sheet(item: $store.presentedToolPane) { pane in
+            WorkspaceToolSheet(pane: pane)
+                .presentationDetents([.medium, .large])
+        }
     }
 }
 
@@ -244,6 +248,7 @@ private struct WorkspacePaneHeader: View {
                         .frame(width: 34, height: 34)
                 }
             }
+            HeaderToolStrip()
             Image(systemName: pane.symbolName)
                 .frame(width: 22)
             Text(pane.title)
@@ -267,6 +272,100 @@ private struct WorkspacePaneHeader: View {
         .padding(.horizontal, 22)
         .padding(.vertical, 14)
         .background(CodexTheme.appBackground)
+    }
+}
+
+private struct HeaderToolStrip: View {
+    @EnvironmentObject private var store: CodexMobileStore
+
+    var body: some View {
+        HStack(spacing: 4) {
+            ForEach(WorkspacePane.headerToolPanes) { pane in
+                HeaderToolButton(
+                    pane: pane,
+                    isSelected: store.presentedToolPane == pane
+                ) {
+                    store.presentToolPane(pane)
+                }
+            }
+        }
+    }
+}
+
+private struct HeaderToolButton: View {
+    var pane: WorkspacePane
+    var isSelected: Bool
+    var action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: pane.symbolName)
+                .font(.callout.weight(.semibold))
+                .frame(width: 32, height: 34)
+                .background(isSelected ? CodexTheme.selected : Color.clear, in: RoundedRectangle(cornerRadius: 8))
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(isSelected ? CodexTheme.text : CodexTheme.secondaryText)
+        .accessibilityLabel(pane.title)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
+    }
+}
+
+private struct WorkspaceToolSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var store: CodexMobileStore
+    var pane: WorkspacePane
+
+    var body: some View {
+        VStack(spacing: 0) {
+            sheetHeader
+            Divider().overlay(CodexTheme.separator)
+            toolContent
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .background(CodexTheme.appBackground.ignoresSafeArea())
+    }
+
+    private var sheetHeader: some View {
+        HStack(spacing: 12) {
+            Image(systemName: pane.symbolName)
+                .frame(width: 22)
+            Text(pane.title)
+                .font(.title3.bold())
+                .foregroundStyle(CodexTheme.text)
+            Spacer()
+            Button {
+                dismiss()
+            } label: {
+                Image(systemName: "xmark")
+                    .frame(width: 34, height: 34)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(CodexTheme.secondaryText)
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 14)
+    }
+
+    @ViewBuilder
+    private var toolContent: some View {
+        switch pane {
+        case .terminal:
+            TerminalFeatureView(actions: store.terminalFeatureActions)
+        case .files:
+            FilesFeatureView(dataSource: store)
+        case .context:
+            ContextUsageFeatureView(
+                state: store.contextUsageState,
+                onRefresh: { await store.refreshContextUsage() },
+                onRequestCompact: { await store.requestContextCompact() }
+            )
+            .task {
+                await store.refreshContextUsage()
+            }
+        case .chat, .automations:
+            WorkspacePanePlaceholder(pane: pane)
+        }
     }
 }
 
@@ -369,7 +468,7 @@ struct CodexSidebar: View {
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(CodexTheme.tertiaryText)
                 .padding(.horizontal, 12)
-            ForEach(WorkspacePane.allCases) { pane in
+            ForEach(WorkspacePane.sidebarPanes) { pane in
                 Button {
                     store.activatePane(pane)
                 } label: {
@@ -581,7 +680,7 @@ struct CompactThreadListView: View {
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(CodexTheme.tertiaryText)
                 .padding(.horizontal, 12)
-            ForEach(WorkspacePane.allCases) { pane in
+            ForEach(WorkspacePane.sidebarPanes) { pane in
                 Button {
                     store.activatePane(pane)
                 } label: {
@@ -888,6 +987,7 @@ struct WorkspaceHeader: View {
                 Image(systemName: "sidebar.left")
                     .frame(width: 34, height: 34)
             }
+            HeaderToolStrip()
             Text(store.selectedThread?.displayTitle ?? "查看 Codex 项目")
                 .font(.headline.weight(.semibold))
                 .foregroundStyle(CodexTheme.text)
@@ -910,6 +1010,7 @@ struct WorkspaceHeader: View {
 
     private var regularHeader: some View {
         Group {
+            HeaderToolStrip()
             Text(store.selectedThread?.displayTitle ?? "查看 Codex 项目")
                 .font(.headline.weight(.semibold))
                 .foregroundStyle(CodexTheme.text)

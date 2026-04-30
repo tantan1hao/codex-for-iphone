@@ -99,6 +99,7 @@ final class CodexMobileStore: ObservableObject {
     @Published var isScannerPresented = false
     @Published var isSidebarPresented = false
     @Published var isSettingsPresented = false
+    @Published var presentedToolPane: WorkspacePane?
     @Published var themePreference: ThemePreference = ThemePreference(
         rawValue: UserDefaults.standard.string(forKey: CodexMobileStore.themePreferenceKey) ?? ThemePreference.system.rawValue
     ) ?? .system {
@@ -263,6 +264,12 @@ final class CodexMobileStore: ObservableObject {
         isSidebarPresented = false
     }
 
+    func presentToolPane(_ pane: WorkspacePane) {
+        guard WorkspacePane.headerToolPanes.contains(pane) else { return }
+        presentedToolPane = pane
+        isSidebarPresented = false
+    }
+
     func setThemePreference(_ preference: ThemePreference) {
         themePreference = preference
     }
@@ -305,6 +312,7 @@ final class CodexMobileStore: ObservableObject {
         pairing = payload
         pairingText = payload.deepLinkURL.absoluteString
         activePane = .chat
+        presentedToolPane = nil
         threads = []
         selectedThread = nil
         conversation = ConversationState()
@@ -381,6 +389,7 @@ final class CodexMobileStore: ObservableObject {
         answeringApprovalID = nil
         answeringApprovalDecisionID = nil
         isSettingsPresented = false
+        presentedToolPane = nil
         isSidebarPresented = false
         isLoadingHistoryContent = false
         isLoadingMoreHistory = false
@@ -395,6 +404,7 @@ final class CodexMobileStore: ObservableObject {
         pairing = nil
         pairingText = ""
         activePane = .chat
+        presentedToolPane = nil
         threads = []
         selectedThread = nil
         conversation = ConversationState()
@@ -443,6 +453,7 @@ final class CodexMobileStore: ObservableObject {
         isScannerPresented = false
         isSidebarPresented = false
         isSettingsPresented = false
+        presentedToolPane = nil
         availableModels = preview.availableModels
         selectedModelID = preview.selectedModelID
         selectedReasoningEffort = preview.selectedReasoningEffort
