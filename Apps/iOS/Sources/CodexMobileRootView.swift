@@ -390,23 +390,21 @@ private struct ContextRemainingRing: View {
     var remainingFraction: Double?
     var isSelected: Bool
 
-    private var displayFraction: Double {
-        guard let remainingFraction else { return 0.18 }
-        return min(max(remainingFraction, 0), 1)
-    }
-
     var body: some View {
         ZStack {
             Circle()
                 .stroke(trackColor, lineWidth: 3)
-            Circle()
-                .trim(from: 0, to: displayFraction)
-                .stroke(
-                    progressColor,
-                    style: StrokeStyle(lineWidth: 3, lineCap: .round)
-                )
-                .rotationEffect(.degrees(-90))
-                .animation(.snappy(duration: 0.24), value: displayFraction)
+            if let remainingFraction {
+                let displayFraction = min(max(remainingFraction, 0), 1)
+                Circle()
+                    .trim(from: 0, to: displayFraction)
+                    .stroke(
+                        progressColor,
+                        style: StrokeStyle(lineWidth: 3, lineCap: .round)
+                    )
+                    .rotationEffect(.degrees(-90))
+                    .animation(.snappy(duration: 0.24), value: displayFraction)
+            }
         }
     }
 
@@ -418,9 +416,6 @@ private struct ContextRemainingRing: View {
     }
 
     private var progressColor: Color {
-        if remainingFraction == nil {
-            return CodexTheme.secondaryText
-        }
         return isSelected ? CodexTheme.text : CodexTheme.secondaryText
     }
 }
