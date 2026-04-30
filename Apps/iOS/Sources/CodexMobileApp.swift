@@ -1332,6 +1332,12 @@ extension CodexMobileStore: TerminalFeatureActionProviding, WorkspaceFileDataSou
             },
             stop: { [weak self] in
                 await self?.stopTerminalCommand()
+            },
+            write: { [weak self] text, closeStdin in
+                await self?.writeTerminalInput(text, closeStdin: closeStdin)
+            },
+            resize: { [weak self] cols, rows in
+                await self?.resizeTerminal(cols: cols, rows: rows)
             }
         )
     }
@@ -1418,6 +1424,8 @@ extension CodexMobileStore: TerminalFeatureActionProviding, WorkspaceFileDataSou
 
         let command = request.command
         let cwd = request.cwd.isEmpty ? pairing?.cwd : request.cwd
+        let cols = request.cols
+        let rows = request.rows
         return AsyncThrowingStream { continuation in
             terminalOutputContinuation = continuation
             Task { @MainActor in
@@ -1425,6 +1433,8 @@ extension CodexMobileStore: TerminalFeatureActionProviding, WorkspaceFileDataSou
                     let result = try await client.startCommand(
                         command: command,
                         cwd: cwd,
+                        cols: cols,
+                        rows: rows,
                         timeoutSeconds: 120
                     )
                     if !result.processID.isEmpty {
@@ -1460,6 +1470,18 @@ extension CodexMobileStore: TerminalFeatureActionProviding, WorkspaceFileDataSou
         }
         guard let processID = terminalActiveProcessID, !processID.isEmpty else { return }
         _ = try? await client.terminateCommand(processID: processID)
+    }
+
+    private func writeTerminalInput(_ text: String, closeStdin: Bool) async {
+        guard isConnected, !isDesignPreviewMode else { return }
+        guard let processID = terminalActiveProcessID, !processID.isEmpty else { return }
+        _ = try? await client.writeCommand(processID: processID, text: text, closeStdin: closeStdin)
+    }
+
+    private func resizeTerminal(cols: Int, rows: Int) async {
+        guard isConnected, !isDesignPreviewMode else { return }
+        guard let processID = terminalActiveProcessID, !processID.isEmpty else { return }
+        _ = try? await client.resizeCommand(processID: processID, cols: cols, rows: rows)
     }
 
     func syncFeatureState(from event: AppServerEvent) {
