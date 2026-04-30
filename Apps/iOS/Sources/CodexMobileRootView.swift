@@ -2,22 +2,6 @@ import CodexMobileKit
 import SwiftUI
 import UIKit
 
-private enum CodexTheme {
-    static let appBackground = Color(red: 0.055, green: 0.055, blue: 0.055)
-    static let sidebarTop = Color(red: 0.16, green: 0.14, blue: 0.24)
-    static let sidebarBottom = Color(red: 0.10, green: 0.10, blue: 0.12)
-    static let panel = Color(red: 0.105, green: 0.105, blue: 0.105)
-    static let panelRaised = Color(red: 0.135, green: 0.135, blue: 0.135)
-    static let selected = Color.white.opacity(0.12)
-    static let separator = Color.white.opacity(0.07)
-    static let text = Color.white.opacity(0.92)
-    static let secondaryText = Color.white.opacity(0.55)
-    static let tertiaryText = Color.white.opacity(0.34)
-    static let green = Color(red: 0.18, green: 0.76, blue: 0.42)
-    static let orange = Color(red: 1.0, green: 0.45, blue: 0.18)
-    static let blue = Color(red: 0.36, green: 0.63, blue: 1.0)
-}
-
 struct CodexMobileRootView: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @EnvironmentObject private var store: CodexMobileStore
@@ -30,7 +14,7 @@ struct CodexMobileRootView: View {
                 RegularCodexRoot()
             }
         }
-        .preferredColorScheme(.dark)
+        .preferredColorScheme(store.themePreference.colorScheme)
         .sheet(isPresented: $store.isScannerPresented) {
             QRScannerSheet { value in
                 store.pairingText = value
@@ -40,8 +24,11 @@ struct CodexMobileRootView: View {
         }
         .sheet(isPresented: $store.isSettingsPresented) {
             SettingsView()
-                .presentationDetents([.medium])
-                .preferredColorScheme(.dark)
+                .presentationDetents([.medium, .large])
+        }
+        .sheet(item: $store.presentedToolPane) { pane in
+            WorkspaceToolSheet(pane: pane)
+                .presentationDetents([.medium, .large])
         }
     }
 }
@@ -56,11 +43,7 @@ struct RegularCodexRoot: View {
             Rectangle()
                 .fill(CodexTheme.separator)
                 .frame(width: 1)
-            if store.pairing == nil {
-                PairingView()
-            } else {
-                CodexWorkspaceView()
-            }
+            WorkspacePaneContentView()
         }
         .background(CodexTheme.appBackground)
     }
@@ -76,11 +59,7 @@ struct CompactCodexRoot: View {
             let progress = sidebarProgress(drawerWidth: drawerWidth)
             ZStack(alignment: .leading) {
                 NavigationStack {
-                    if store.pairing == nil {
-                        PairingView()
-                    } else {
-                        CodexWorkspaceView()
-                    }
+                    WorkspacePaneContentView()
                 }
                 .background(CodexTheme.appBackground)
 
@@ -156,6 +135,414 @@ struct CompactCodexRoot: View {
     }
 }
 
+struct WorkspacePaneContentView: View {
+    @EnvironmentObject private var store: CodexMobileStore
+
+    var body: some View {
+        switch store.activePane {
+        case .chat:
+            ChatPaneContentView()
+        case .automations:
+            WorkspacePaneFeatureContainer(pane: .automations) {
+                AutomationsFeatureView(
+                    state: store.automationsState,
+                    onRefresh: { await store.refreshAutomations() }
+                )
+                .task {
+                    await store.refreshAutomations()
+                }
+            }
+        case .terminal:
+            WorkspacePaneFeatureContainer(pane: .terminal) {
+                TerminalFeatureView(actions: store.terminalFeatureActions)
+            }
+        case .files:
+            WorkspacePaneFeatureContainer(pane: .files) {
+                FilesFeatureView(dataSource: store)
+            }
+        case .context:
+            WorkspacePaneFeatureContainer(pane: .context) {
+                ContextUsageFeatureView(
+                    state: store.contextUsageState,
+                    onRefresh: { await store.refreshContextUsage() },
+                    onRequestCompact: { await store.requestContextCompact() }
+                )
+                .task {
+                    await store.refreshContextUsage()
+                }
+            }
+        }
+    }
+}
+
+private struct ChatPaneContentView: View {
+    @EnvironmentObject private var store: CodexMobileStore
+
+    var body: some View {
+        if store.isConnected || store.isPreviewMode {
+            CodexWorkspaceView()
+        } else {
+            PairingView()
+        }
+    }
+}
+
+private struct WorkspacePanePlaceholder: View {
+    var pane: WorkspacePane
+
+    var body: some View {
+        VStack(spacing: 0) {
+            WorkspacePaneHeader(pane: pane)
+            VStack(spacing: 18) {
+                Image(systemName: pane.symbolName)
+                    .font(.system(size: 46, weight: .semibold))
+                    .foregroundStyle(CodexTheme.blue)
+                    .frame(width: 72, height: 72)
+                    .background(CodexTheme.selected, in: RoundedRectangle(cornerRadius: 18))
+                VStack(spacing: 7) {
+                    Text(pane.title)
+                        .font(.title2.bold())
+                        .foregroundStyle(CodexTheme.text)
+                    Text("等待主功能接线")
+                        .font(.body)
+                        .foregroundStyle(CodexTheme.secondaryText)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .padding(24)
+        }
+        .background(CodexTheme.appBackground)
+        .navigationTitle(pane.title)
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+private struct WorkspacePaneFeatureContainer<Content: View>: View {
+    var pane: WorkspacePane
+    @ViewBuilder var content: () -> Content
+
+    var body: some View {
+        VStack(spacing: 0) {
+            WorkspacePaneHeader(pane: pane)
+            content()
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .background(CodexTheme.appBackground)
+        .navigationTitle(pane.title)
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+private struct WorkspacePaneHeader: View {
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @EnvironmentObject private var store: CodexMobileStore
+    var pane: WorkspacePane
+
+    var body: some View {
+        HStack(spacing: 12) {
+            if horizontalSizeClass == .compact {
+                Button {
+                    store.isSidebarPresented = true
+                } label: {
+                    Image(systemName: "sidebar.left")
+                        .frame(width: 34, height: 34)
+                }
+            }
+            HeaderToolStrip()
+            Image(systemName: pane.symbolName)
+                .frame(width: 22)
+            Text(pane.title)
+                .font(.headline.weight(.semibold))
+                .foregroundStyle(CodexTheme.text)
+            if horizontalSizeClass != .compact {
+                Text(store.pairing?.name ?? "mac")
+                    .font(.headline)
+                    .foregroundStyle(CodexTheme.tertiaryText)
+            }
+            Spacer(minLength: 8)
+            Button {
+                store.isSettingsPresented = true
+            } label: {
+                Image(systemName: "ellipsis")
+                    .frame(width: 34, height: 34)
+            }
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(CodexTheme.secondaryText)
+        .padding(.horizontal, 22)
+        .padding(.vertical, 14)
+        .background(CodexTheme.appBackground)
+    }
+}
+
+private struct HeaderToolStrip: View {
+    @EnvironmentObject private var store: CodexMobileStore
+    @State private var isContextInfoPresented = false
+
+    var body: some View {
+        HStack(spacing: 4) {
+            ForEach(WorkspacePane.headerToolPanes) { pane in
+                HeaderToolButton(
+                    pane: pane,
+                    isSelected: isPaneSelected(pane),
+                    contextRemainingFraction: contextRemainingFraction(for: pane)
+                ) {
+                    handleTap(pane)
+                }
+                .popover(
+                    isPresented: contextPopoverBinding(for: pane),
+                    attachmentAnchor: .rect(.bounds),
+                    arrowEdge: .top
+                ) {
+                    ContextUsageInfoPopover(state: store.contextUsageState)
+                        .task {
+                            await store.refreshContextUsage()
+                        }
+                        .presentationCompactAdaptation(.popover)
+                        .presentationBackground(CodexTheme.panel)
+                }
+            }
+        }
+    }
+
+    private func isPaneSelected(_ pane: WorkspacePane) -> Bool {
+        if pane == .context {
+            return isContextInfoPresented
+        }
+        return store.presentedToolPane == pane
+    }
+
+    private func handleTap(_ pane: WorkspacePane) {
+        if pane == .context {
+            store.presentedToolPane = nil
+            isContextInfoPresented.toggle()
+            if isContextInfoPresented {
+                Task { await store.refreshContextUsage() }
+            }
+        } else {
+            isContextInfoPresented = false
+            store.presentToolPane(pane)
+        }
+    }
+
+    private func contextPopoverBinding(for pane: WorkspacePane) -> Binding<Bool> {
+        Binding(
+            get: {
+                pane == .context && isContextInfoPresented
+            },
+            set: { newValue in
+                guard pane == .context else { return }
+                isContextInfoPresented = newValue
+            }
+        )
+    }
+
+    private func contextRemainingFraction(for pane: WorkspacePane) -> Double? {
+        guard pane == .context,
+              case let .loaded(snapshot) = store.contextUsageState
+        else { return nil }
+        return snapshot.resolvedRemainingFraction
+    }
+}
+
+private struct HeaderToolButton: View {
+    var pane: WorkspacePane
+    var isSelected: Bool
+    var contextRemainingFraction: Double?
+    var action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            toolIcon
+                .frame(width: 32, height: 34)
+                .background(isSelected ? CodexTheme.selected : Color.clear, in: RoundedRectangle(cornerRadius: 8))
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(isSelected ? CodexTheme.text : CodexTheme.secondaryText)
+        .accessibilityLabel(pane.title)
+        .accessibilityValue(accessibilityValue)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
+    }
+
+    @ViewBuilder
+    private var toolIcon: some View {
+        if pane == .context {
+            ContextRemainingRing(
+                remainingFraction: contextRemainingFraction,
+                isSelected: isSelected
+            )
+            .frame(width: 18, height: 18)
+        } else {
+            Image(systemName: pane.symbolName)
+                .font(.callout.weight(.semibold))
+        }
+    }
+
+    private var accessibilityValue: String {
+        guard pane == .context,
+              let contextRemainingFraction
+        else { return "" }
+        return "剩余 \(Int((min(max(contextRemainingFraction, 0), 1) * 100).rounded()))%"
+    }
+}
+
+private struct ContextRemainingRing: View {
+    var remainingFraction: Double?
+    var isSelected: Bool
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .stroke(trackColor, lineWidth: 3)
+            if let remainingFraction {
+                let displayFraction = min(max(remainingFraction, 0), 1)
+                Circle()
+                    .trim(from: 0, to: displayFraction)
+                    .stroke(
+                        progressColor,
+                        style: StrokeStyle(lineWidth: 3, lineCap: .round)
+                    )
+                    .rotationEffect(.degrees(-90))
+                    .animation(.snappy(duration: 0.24), value: displayFraction)
+            }
+        }
+    }
+
+    private var trackColor: Color {
+        if isSelected {
+            return CodexTheme.secondaryText.opacity(0.28)
+        }
+        return CodexTheme.secondaryText.opacity(0.22)
+    }
+
+    private var progressColor: Color {
+        return isSelected ? CodexTheme.text : CodexTheme.secondaryText
+    }
+}
+
+private struct ContextUsageInfoPopover: View {
+    var state: ContextUsageFeatureView.ContentState
+
+    var body: some View {
+        VStack(spacing: 9) {
+            Text("背景信息窗口:")
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(CodexTheme.secondaryText)
+
+            switch state {
+            case .loaded(let snapshot):
+                Text(percentSummaryLine(snapshot))
+                    .font(.title3.weight(.regular))
+                    .foregroundStyle(CodexTheme.text)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.78)
+            case .loading:
+                Text("百分比更新中")
+                    .font(.title3.weight(.regular))
+                    .foregroundStyle(CodexTheme.text)
+                    .lineLimit(1)
+            case .unsupported:
+                Text("百分比等待更新")
+                    .font(.title3.weight(.regular))
+                    .foregroundStyle(CodexTheme.text)
+                    .lineLimit(1)
+            case .error:
+                Text("百分比不可用")
+                    .font(.title3.weight(.regular))
+                    .foregroundStyle(CodexTheme.text)
+                    .lineLimit(1)
+            }
+
+            Text("Codex 自动压缩其背景信息")
+                .font(.headline.weight(.bold))
+                .foregroundStyle(CodexTheme.text)
+                .lineLimit(1)
+                .minimumScaleFactor(0.82)
+        }
+        .multilineTextAlignment(.center)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 14)
+        .frame(width: 270)
+        .background(CodexTheme.panel, in: RoundedRectangle(cornerRadius: 14))
+        .overlay {
+            RoundedRectangle(cornerRadius: 14)
+                .stroke(CodexTheme.separator, lineWidth: 1)
+        }
+    }
+
+    private func percentSummaryLine(_ snapshot: ContextUsageFeatureView.Snapshot) -> String {
+        guard let usedFraction = snapshot.usedFraction,
+              let remainingFraction = snapshot.resolvedRemainingFraction
+        else {
+            return "百分比等待更新"
+        }
+        return "\(percentText(usedFraction)) 已用（剩余 \(percentText(remainingFraction))）"
+    }
+
+    private func percentText(_ fraction: Double) -> String {
+        let clampedFraction = min(max(fraction, 0), 1)
+        return "\(Int((clampedFraction * 100).rounded()))%"
+    }
+}
+
+private struct WorkspaceToolSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var store: CodexMobileStore
+    var pane: WorkspacePane
+
+    var body: some View {
+        VStack(spacing: 0) {
+            sheetHeader
+            Divider().overlay(CodexTheme.separator)
+            toolContent
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .background(CodexTheme.appBackground.ignoresSafeArea())
+    }
+
+    private var sheetHeader: some View {
+        HStack(spacing: 12) {
+            Image(systemName: pane.symbolName)
+                .frame(width: 22)
+            Text(pane.title)
+                .font(.title3.bold())
+                .foregroundStyle(CodexTheme.text)
+            Spacer()
+            Button {
+                dismiss()
+            } label: {
+                Image(systemName: "xmark")
+                    .frame(width: 34, height: 34)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(CodexTheme.secondaryText)
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 14)
+    }
+
+    @ViewBuilder
+    private var toolContent: some View {
+        switch pane {
+        case .terminal:
+            TerminalFeatureView(actions: store.terminalFeatureActions)
+        case .files:
+            FilesFeatureView(dataSource: store)
+        case .context:
+            ContextUsageFeatureView(
+                state: store.contextUsageState,
+                onRefresh: { await store.refreshContextUsage() },
+                onRequestCompact: { await store.requestContextCompact() }
+            )
+            .task {
+                await store.refreshContextUsage()
+            }
+        case .chat, .automations:
+            WorkspacePanePlaceholder(pane: pane)
+        }
+    }
+}
+
 private struct SidebarEdgeSwipeHandle: UIViewRepresentable {
     @Binding var isPresented: Bool
 
@@ -200,11 +587,19 @@ private struct SidebarEdgeSwipeHandle: UIViewRepresentable {
 
 struct CodexSidebar: View {
     @EnvironmentObject private var store: CodexMobileStore
+    @State private var searchQuery = ""
+
+    private var filteredThreads: [CodexThread] {
+        ThreadSearch.filter(store.threads, query: searchQuery)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             sidebarTopChrome
             sidebarActions
+            SidebarSearchField(text: $searchQuery)
+                .padding(.bottom, 18)
+            toolsSection
             projectHeader
             threadList
             Spacer(minLength: 16)
@@ -239,12 +634,35 @@ struct CodexSidebar: View {
     private var sidebarActions: some View {
         VStack(alignment: .leading, spacing: 12) {
             SidebarAction(icon: "square.and.pencil", title: "新对话") {
+                store.activatePane(.chat)
                 Task { await store.startNewThread() }
             }
             .disabled(!store.canStartThread)
             .opacity(store.canStartThread ? 1 : 0.45)
         }
-        .padding(.bottom, 28)
+        .padding(.bottom, 22)
+    }
+
+    private var toolsSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("工具")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(CodexTheme.tertiaryText)
+                .padding(.horizontal, 12)
+            ForEach(WorkspacePane.sidebarPanes) { pane in
+                Button {
+                    store.activatePane(pane)
+                    store.isSidebarPresented = false
+                } label: {
+                    SidebarPaneRow(
+                        pane: pane,
+                        isSelected: store.activePane == pane
+                    )
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.bottom, 24)
     }
 
     private var projectHeader: some View {
@@ -269,16 +687,21 @@ struct CodexSidebar: View {
     private var threadList: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 4) {
-                ForEach(store.threads) { thread in
-                    Button {
-                        Task { await store.select(thread) }
-                    } label: {
-                        SidebarThreadRow(
-                            thread: thread,
-                            isSelected: store.selectedThread?.id == thread.id
-                        )
+                if filteredThreads.isEmpty {
+                    SidebarSearchEmptyState(query: searchQuery)
+                } else {
+                    ForEach(filteredThreads) { thread in
+                        Button {
+                            store.activatePane(.chat)
+                            Task { await store.select(thread) }
+                        } label: {
+                            SidebarThreadRow(
+                                thread: thread,
+                                isSelected: store.activePane == .chat && store.selectedThread?.id == thread.id
+                            )
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
                 }
             }
         }
@@ -330,6 +753,104 @@ struct SidebarAction: View {
     }
 }
 
+private struct SidebarSearchField: View {
+    @Binding var text: String
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        HStack(spacing: 9) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(CodexTheme.secondaryText)
+            TextField("搜索会话", text: $text)
+                .focused($isFocused)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .foregroundStyle(CodexTheme.text)
+                .submitLabel(.search)
+            if !text.isEmpty {
+                Button {
+                    text = ""
+                    isFocused = true
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(CodexTheme.tertiaryText)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .font(.callout.weight(.medium))
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(CodexTheme.panelRaised, in: RoundedRectangle(cornerRadius: 10))
+        .overlay {
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(CodexTheme.separator, lineWidth: 1)
+        }
+    }
+}
+
+private struct SidebarSearchEmptyState: View {
+    var query: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .font(.title3.weight(.semibold))
+                .foregroundStyle(CodexTheme.secondaryText)
+            Text(query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "没有会话" : "没有匹配结果")
+                .font(.callout.weight(.semibold))
+                .foregroundStyle(CodexTheme.text)
+            Text("搜索会话标题、预览或路径。")
+                .font(.caption)
+                .foregroundStyle(CodexTheme.secondaryText)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 14)
+    }
+}
+
+private enum ThreadSearch {
+    static func filter(_ threads: [CodexThread], query: String) -> [CodexThread] {
+        let tokens = query
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .split(whereSeparator: { $0.isWhitespace })
+            .map(String.init)
+        guard !tokens.isEmpty else { return threads }
+        return threads.filter { thread in
+            let fields = [
+                thread.displayTitle,
+                thread.preview,
+                thread.cwd,
+                thread.status,
+            ]
+            return tokens.allSatisfy { token in
+                fields.contains { field in
+                    field.localizedCaseInsensitiveContains(token)
+                }
+            }
+        }
+    }
+}
+
+struct SidebarPaneRow: View {
+    var pane: WorkspacePane
+    var isSelected: Bool
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: pane.symbolName)
+                .frame(width: 18)
+            Text(pane.title)
+            Spacer(minLength: 0)
+        }
+        .font(.callout.weight(.semibold))
+        .foregroundStyle(isSelected ? CodexTheme.text : CodexTheme.secondaryText)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(isSelected ? CodexTheme.selected : Color.clear, in: RoundedRectangle(cornerRadius: 8))
+    }
+}
+
 struct SidebarThreadRow: View {
     var thread: CodexThread
     var isSelected: Bool
@@ -361,6 +882,11 @@ struct SidebarThreadRow: View {
 
 struct CompactThreadListView: View {
     @EnvironmentObject private var store: CodexMobileStore
+    @State private var searchQuery = ""
+
+    private var filteredThreads: [CodexThread] {
+        ThreadSearch.filter(store.threads, query: searchQuery)
+    }
 
     var body: some View {
         ZStack {
@@ -373,8 +899,8 @@ struct CompactThreadListView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
                     compactDrawerHeader
-                    ConnectionStatusCard()
                     Button {
+                        store.activatePane(.chat)
                         Task {
                             await store.startNewThread()
                             await MainActor.run {
@@ -388,23 +914,29 @@ struct CompactThreadListView: View {
                     .buttonStyle(CodexDarkButtonStyle())
                     .disabled(!store.canStartThread)
                     .opacity(store.canStartThread ? 1 : 0.45)
+                    SidebarSearchField(text: $searchQuery)
+                    compactToolsSection
                     VStack(alignment: .leading, spacing: 6) {
                         Text("项目")
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(CodexTheme.tertiaryText)
-                        ForEach(store.threads) { thread in
-                            Button {
-                                store.isSidebarPresented = false
-                                Task {
-                                    await store.select(thread)
+                        if filteredThreads.isEmpty {
+                            SidebarSearchEmptyState(query: searchQuery)
+                        } else {
+                            ForEach(filteredThreads) { thread in
+                                Button {
+                                    store.activatePane(.chat)
+                                    Task {
+                                        await store.select(thread)
+                                    }
+                                } label: {
+                                    SidebarThreadRow(
+                                        thread: thread,
+                                        isSelected: store.activePane == .chat && store.selectedThread?.id == thread.id
+                                    )
                                 }
-                            } label: {
-                                SidebarThreadRow(
-                                    thread: thread,
-                                    isSelected: store.selectedThread?.id == thread.id
-                                )
+                                .buttonStyle(.plain)
                             }
-                            .buttonStyle(.plain)
                         }
                     }
                 }
@@ -413,6 +945,26 @@ struct CompactThreadListView: View {
         }
         .task {
             await store.refreshThreads()
+        }
+    }
+
+    private var compactToolsSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("工具")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(CodexTheme.tertiaryText)
+                .padding(.horizontal, 12)
+            ForEach(WorkspacePane.sidebarPanes) { pane in
+                Button {
+                    store.activatePane(pane)
+                } label: {
+                    SidebarPaneRow(
+                        pane: pane,
+                        isSelected: store.activePane == pane
+                    )
+                }
+                .buttonStyle(.plain)
+            }
         }
     }
 
@@ -489,7 +1041,6 @@ struct PairingView: View {
             .padding()
         }
         .navigationTitle("Pair")
-        .toolbarColorScheme(.dark, for: .navigationBar)
     }
 
     private var pairingEditor: some View {
@@ -608,7 +1159,6 @@ struct CodexWorkspaceView: View {
         }
         .background(CodexTheme.appBackground)
         .navigationBarTitleDisplayMode(.inline)
-        .toolbarColorScheme(.dark, for: .navigationBar)
     }
 
     private var transcriptScrollKey: String {
@@ -711,12 +1261,16 @@ struct WorkspaceHeader: View {
                 Image(systemName: "sidebar.left")
                     .frame(width: 34, height: 34)
             }
+            HeaderToolStrip()
             Text(store.selectedThread?.displayTitle ?? "查看 Codex 项目")
                 .font(.headline.weight(.semibold))
                 .foregroundStyle(CodexTheme.text)
                 .lineLimit(1)
             if store.isPreviewMode {
                 previewBadge
+            }
+            if let contextRemainingTitle = store.contextRemainingTitle {
+                contextBadge(contextRemainingTitle)
             }
             Spacer(minLength: 8)
             Button {
@@ -730,6 +1284,7 @@ struct WorkspaceHeader: View {
 
     private var regularHeader: some View {
         Group {
+            HeaderToolStrip()
             Text(store.selectedThread?.displayTitle ?? "查看 Codex 项目")
                 .font(.headline.weight(.semibold))
                 .foregroundStyle(CodexTheme.text)
@@ -739,6 +1294,9 @@ struct WorkspaceHeader: View {
                 .foregroundStyle(CodexTheme.tertiaryText)
             if store.isPreviewMode {
                 previewBadge
+            }
+            if let contextRemainingTitle = store.contextRemainingTitle {
+                contextBadge(contextRemainingTitle)
             }
             Button {
                 store.isSettingsPresented = true
@@ -757,6 +1315,15 @@ struct WorkspaceHeader: View {
             .padding(.horizontal, 7)
             .padding(.vertical, 3)
             .background(.orange.opacity(0.16), in: Capsule())
+    }
+
+    private func contextBadge(_ title: String) -> some View {
+        Text(title)
+            .font(.caption2.weight(.bold))
+            .foregroundStyle(CodexTheme.blue)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .background(CodexTheme.blue.opacity(0.14), in: Capsule())
     }
 }
 
@@ -852,18 +1419,11 @@ struct ConnectionStatusCard: View {
                     .foregroundStyle(CodexTheme.text)
                 Spacer()
             }
-            Text(store.connectionState.detail)
-                .font(.caption)
-                .foregroundStyle(CodexTheme.secondaryText)
             if let pairing = store.pairing {
-                Text("\(pairing.name)  \(pairing.connectionTargetDescription)")
-                    .font(.caption.monospaced())
-                    .foregroundStyle(CodexTheme.tertiaryText)
-                    .lineLimit(2)
-                Text(connectionModeText(for: pairing))
+                Text("当前设备：\(pairing.name)")
                     .font(.caption)
-                    .foregroundStyle(pairing.connectionPlan.canRunWithoutDesktopAppChanges ? CodexTheme.secondaryText : CodexTheme.orange)
-                    .lineLimit(2)
+                    .foregroundStyle(CodexTheme.secondaryText)
+                    .lineLimit(1)
                 connectionActions
             } else {
                 Button {
@@ -895,17 +1455,6 @@ struct ConnectionStatusCard: View {
             }
             .buttonStyle(CodexDarkButtonStyle())
             .disabled(!store.isConnected)
-        }
-    }
-
-    private func connectionModeText(for pairing: PairingPayload) -> String {
-        return switch pairing.connectionPlan.transport {
-        case .helperLAN:
-            "Helper LAN：不改桌面 Codex，Mac Helper 启动独立 app-server。"
-        case .helperRelay:
-            "Helper Relay：不改桌面 Codex，通过中继连接 Helper app-server。"
-        case .desktopRemoteControl:
-            "Desktop Remote Control：需要桌面 Codex 开启 remote_control。"
         }
     }
 }
@@ -987,15 +1536,16 @@ struct SettingsView: View {
     var body: some View {
         ZStack {
             CodexTheme.appBackground.ignoresSafeArea()
-            VStack(alignment: .leading, spacing: 18) {
-                settingsHeader
-                ConnectionStatusCard()
-                settingsDetails
-                historyPreferences
-                Spacer(minLength: 8)
-                settingsActions
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    settingsHeader
+                    ConnectionStatusCard()
+                    themePreferences
+                    historyPreferences
+                    settingsActions
+                }
+                .padding(20)
             }
-            .padding(20)
         }
     }
 
@@ -1016,16 +1566,25 @@ struct SettingsView: View {
         }
     }
 
-    private var settingsDetails: some View {
-        VStack(spacing: 0) {
-            settingsRow(icon: "desktopcomputer", title: "电脑", value: store.pairing?.name ?? "未配对")
-            Divider().overlay(CodexTheme.separator)
-            settingsRow(icon: "link", title: "连接模式", value: connectionModeValue)
-            Divider().overlay(CodexTheme.separator)
-            settingsRow(icon: "network", title: "地址", value: pairingAddress)
-            Divider().overlay(CodexTheme.separator)
-            settingsRow(icon: "folder", title: "工作区", value: store.pairing?.cwd ?? "-")
+    private var themePreferences: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("外观")
+                .font(.callout.weight(.semibold))
+                .foregroundStyle(CodexTheme.text)
+            Picker(
+                "外观",
+                selection: Binding(
+                    get: { store.themePreference },
+                    set: { store.setThemePreference($0) }
+                )
+            ) {
+                ForEach(ThemePreference.allCases) { preference in
+                    Text(preference.title).tag(preference)
+                }
+            }
+            .pickerStyle(.segmented)
         }
+        .padding(14)
         .background(CodexTheme.panel, in: RoundedRectangle(cornerRadius: 12))
         .overlay {
             RoundedRectangle(cornerRadius: 12)
@@ -1061,76 +1620,23 @@ struct SettingsView: View {
         }
     }
 
-    private var pairingAddress: String {
-        guard let pairing = store.pairing else { return "-" }
-        return "\(pairing.host):\(pairing.port)"
-    }
-
-    private var connectionModeValue: String {
-        guard let pairing = store.pairing else { return "-" }
-        return switch pairing.connectionPlan.transport {
-        case .helperLAN: "Helper LAN"
-        case .helperRelay: "Helper Relay"
-        case .desktopRemoteControl: "Remote Control"
-        }
-    }
-
-    private func settingsRow(icon: String, title: String, value: String) -> some View {
-        HStack(spacing: 12) {
-            Image(systemName: icon)
-                .foregroundStyle(CodexTheme.secondaryText)
-                .frame(width: 22)
-            Text(title)
-                .font(.callout.weight(.semibold))
-                .foregroundStyle(CodexTheme.text)
-            Spacer(minLength: 12)
-            Text(value)
-                .font(.caption)
-                .foregroundStyle(CodexTheme.secondaryText)
-                .lineLimit(1)
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 14)
-    }
-
     private var settingsActions: some View {
-        VStack(spacing: 10) {
-            HStack {
-                Button {
-                    Task { await store.reconnect() }
-                } label: {
-                    Label("重连", systemImage: "arrow.clockwise")
-                }
-                .buttonStyle(CodexDarkButtonStyle())
-                .disabled(!store.canReconnect)
-
-                Button {
-                    store.disconnect()
-                } label: {
-                    Label("断开", systemImage: "power")
-                }
-                .buttonStyle(CodexDarkButtonStyle())
-                .disabled(!store.isConnected)
-                Spacer()
+        HStack {
+            Button(role: .destructive) {
+                store.forgetPairing()
+                dismiss()
+            } label: {
+                Label("取消配对", systemImage: "trash")
             }
-
-            HStack {
-                Button(role: .destructive) {
-                    store.forgetPairing()
-                    dismiss()
-                } label: {
-                    Label("取消配对", systemImage: "trash")
-                }
-                .buttonStyle(CodexDarkButtonStyle())
-                .disabled(store.pairing == nil)
-                Spacer()
-                Button {
-                    dismiss()
-                } label: {
-                    Text("完成")
-                }
-                .buttonStyle(CodexPrimaryButtonStyle())
+            .buttonStyle(CodexDarkButtonStyle())
+            .disabled(store.pairing == nil)
+            Spacer()
+            Button {
+                dismiss()
+            } label: {
+                Text("完成")
             }
+            .buttonStyle(CodexPrimaryButtonStyle())
         }
     }
 }
@@ -1171,7 +1677,7 @@ struct UserBubble: View {
                     .foregroundStyle(CodexTheme.text)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 12)
-                    .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 14))
+                    .background(CodexTheme.userBubble, in: RoundedRectangle(cornerRadius: 14))
                 if status == "failed" {
                     Label("发送失败，已恢复到输入框", systemImage: "exclamationmark.triangle.fill")
                         .font(.caption)
@@ -1323,6 +1829,8 @@ struct ApprovalCard: View {
 struct ComposerView: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @EnvironmentObject private var store: CodexMobileStore
+    @StateObject private var dictationController = DictationController()
+    @State private var dictationBaseText = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -1338,6 +1846,14 @@ struct ComposerView: View {
                     .textFieldStyle(.plain)
             }
             composerControls
+        }
+        .onChange(of: dictationController.currentTranscript) { _, transcript in
+            applyDictationTranscript(transcript)
+        }
+        .onChange(of: dictationController.state) { _, state in
+            if state != .listening {
+                dictationBaseText = store.composerText
+            }
         }
         .frame(maxWidth: 900)
         .padding(.horizontal, horizontalSizeClass == .compact ? 12 : 18)
@@ -1364,6 +1880,16 @@ struct ComposerView: View {
         HStack(spacing: horizontalSizeClass == .compact ? 9 : 12) {
             permissionBadge
             modelBadge
+            ComposerFeatureControls(
+                dictationState: dictationController.state,
+                isPlanModeEnabled: Binding(
+                    get: { store.isPlanModeEnabled },
+                    set: { store.setPlanModeEnabled($0) }
+                ),
+                isDictationEnabled: !store.conversation.isRunning,
+                onDictationTapped: toggleDictation
+            )
+            .opacity(store.planModeAvailable || !store.isConnected ? 1 : 0.72)
             Spacer(minLength: 6)
             if store.conversation.isRunning {
                 ProgressView()
@@ -1397,7 +1923,7 @@ struct ComposerView: View {
                 } label: {
                     Image(systemName: "arrow.up")
                         .font(.headline.weight(.bold))
-                        .foregroundStyle(.black.opacity(store.canSendComposer ? 1 : 0.42))
+                        .foregroundStyle(CodexTheme.onSendButton.opacity(store.canSendComposer ? 1 : 0.42))
                         .frame(width: 38, height: 38)
                         .background(sendButtonFill, in: Circle())
                 }
@@ -1415,19 +1941,28 @@ struct ComposerView: View {
                     Button {
                         Task { await store.changePermissionPreset(to: preset) }
                     } label: {
-                        if store.selectedPermissionPreset == preset {
-                            Label(preset.displayTitle, systemImage: "checkmark")
-                        } else {
-                            Text(preset.displayTitle)
+                        HStack {
+                            Label {
+                                Text(preset.displayTitle)
+                            } icon: {
+                                Image(systemName: preset.symbolName)
+                                    .foregroundStyle(preset.tintColor)
+                            }
+                            if store.selectedPermissionPreset == preset {
+                                Spacer()
+                                Image(systemName: "checkmark")
+                                    .foregroundStyle(preset.tintColor)
+                            }
                         }
                     }
+                    .tint(preset.tintColor)
                 }
             }
         } label: {
             statusChip(
-                icon: "exclamationmark.shield",
+                icon: store.selectedPermissionPreset.symbolName,
                 title: horizontalSizeClass == .compact ? store.compactPermissionStatusTitle : store.permissionStatusTitle,
-                tint: CodexTheme.orange
+                tint: store.selectedPermissionPreset.tintColor
             )
         }
         .disabled(!store.canChangeSessionSettings)
@@ -1474,7 +2009,7 @@ struct ComposerView: View {
     }
 
     private var sendButtonFill: Color {
-        store.canSendComposer ? CodexTheme.text : CodexTheme.tertiaryText.opacity(0.55)
+        store.canSendComposer ? CodexTheme.sendButtonFill : CodexTheme.tertiaryText.opacity(0.55)
     }
 
     private func statusChip(icon: String, title: String, tint: Color) -> some View {
@@ -1498,6 +2033,35 @@ struct ComposerView: View {
         case "high": "高"
         case "xhigh": "超高"
         default: value
+        }
+    }
+
+    private func toggleDictation() {
+        switch dictationController.state {
+        case .listening:
+            dictationController.stop()
+            dictationBaseText = store.composerText
+        default:
+            dictationBaseText = store.composerText
+            Task {
+                await dictationController.start()
+            }
+        }
+    }
+
+    private func applyDictationTranscript(_ transcript: String) {
+        guard !transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        let separator = dictationBaseText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "" : " "
+        store.composerText = dictationBaseText + separator + transcript
+    }
+}
+
+private extension CodexPermissionPreset {
+    var tintColor: Color {
+        switch self {
+        case .readOnly: CodexTheme.secondaryText
+        case .workspaceWrite: CodexTheme.blue
+        case .fullAccess: CodexTheme.orange
         }
     }
 }

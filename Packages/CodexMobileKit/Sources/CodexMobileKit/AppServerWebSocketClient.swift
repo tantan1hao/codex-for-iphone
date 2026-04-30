@@ -5,6 +5,7 @@ public final class AppServerWebSocketClient {
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
     private var task: URLSessionWebSocketTask?
+    private var connectionGeneration = 0
     private var nextRequestID = 1
     private var pendingRequests: [JSONRPCID: CheckedContinuation<JSONValue, Error>] = [:]
     private let eventContinuation: AsyncStream<AppServerEvent>.Continuation
@@ -12,6 +13,7 @@ public final class AppServerWebSocketClient {
     private var remoteControlClientID = ""
     private var remoteControlStreamID = ""
     private var remoteControlNextSeqID = 1
+    private var suppressDisconnectEvents = false
 
     public let events: AsyncStream<AppServerEvent>
 
@@ -27,10 +29,13 @@ public final class AppServerWebSocketClient {
     }
 
     public func connect(to pairing: PairingPayload, appVersion: String) async throws {
+        connectionGeneration += 1
+        let generation = connectionGeneration
         let plan = pairing.connectionPlan
         if let readyzURL = plan.readyzURL {
             try await checkReady(url: readyzURL)
         }
+        try ensureConnectionIsCurrent(generation)
         connectionMode = pairing.connectionMode
         if plan.usesRemoteControlEnvelope {
             remoteControlClientID = "codex-mobile-\(UUID().uuidString)"
@@ -43,18 +48,74 @@ public final class AppServerWebSocketClient {
         }
         var request = URLRequest(url: plan.webSocketURL)
         request.setValue("Bearer \(pairing.token)", forHTTPHeaderField: "Authorization")
+        try await establishConnection(
+            request: request,
+            pairing: pairing,
+            plan: plan,
+            generation: generation,
+            appVersion: appVersion
+        )
+    }
+
+    private func establishConnection(
+        request: URLRequest,
+        pairing: PairingPayload,
+        plan: CodexConnectionPlan,
+        generation: Int,
+        appVersion: String
+    ) async throws {
+        let maximumAttempts = plan.registersRelay ? 4 : 1
+        var lastError: Error?
+        suppressDisconnectEvents = true
+        defer { suppressDisconnectEvents = false }
+
+        for attempt in 0..<maximumAttempts {
+            do {
+                try await openWebSocket(request: request, pairing: pairing, plan: plan, generation: generation)
+                startReceiveLoop()
+                try await initialize(appVersion: appVersion)
+                try ensureConnectionIsCurrent(generation)
+                return
+            } catch {
+                closeCurrentTaskAfterFailedConnection(error)
+                guard isTransientSocketNotConnected(error), attempt + 1 < maximumAttempts else {
+                    throw error
+                }
+                lastError = error
+                try await Task.sleep(nanoseconds: retryDelay(forAttempt: attempt))
+            }
+        }
+
+        throw lastError ?? AppServerClientError.notConnected
+    }
+
+    private func openWebSocket(
+        request: URLRequest,
+        pairing: PairingPayload,
+        plan: CodexConnectionPlan,
+        generation: Int
+    ) async throws {
+        try ensureConnectionIsCurrent(generation)
         let socket = URLSession.shared.webSocketTask(with: request)
-        self.task = socket
+        task = socket
         socket.resume()
+
         if plan.registersRelay {
             try await registerRelay(pairing: pairing)
+            try ensureConnectionIsCurrent(generation)
         }
-        startReceiveLoop()
-        do {
-            try await initialize(appVersion: appVersion)
-        } catch {
-            disconnect(emitEvent: false)
-            throw error
+    }
+
+    private func closeCurrentTaskAfterFailedConnection(_ error: Error) {
+        let socket = task
+        task = nil
+        socket?.cancel(with: .goingAway, reason: nil)
+        failPendingRequests(error)
+    }
+
+    private func ensureConnectionIsCurrent(_ generation: Int) throws {
+        guard connectionGeneration == generation else {
+            throw CancellationError()
         }
     }
 
@@ -76,7 +137,7 @@ public final class AppServerWebSocketClient {
                 "cwd": .string(pairing.cwd),
             ]
         )
-        try await socket.send(.string(CodexRelayWire.registrationString(registration)))
+        try await sendWebSocketMessage(.string(CodexRelayWire.registrationString(registration)), on: socket)
         let acknowledgement = try CodexRelayWire.acknowledgement(from: try await socket.receive())
         guard acknowledgement.type == "register_ack", acknowledgement.ok else {
             throw AppServerClientError.transport(acknowledgement.error ?? "Relay registration was rejected.")
@@ -90,6 +151,7 @@ public final class AppServerWebSocketClient {
     public func checkReady(url: URL) async throws {
         var request = URLRequest(url: url)
         request.timeoutInterval = 2
+        request.setValue("close", forHTTPHeaderField: "Connection")
         let (_, response) = try await URLSession.shared.data(for: request)
         guard let httpResponse = response as? HTTPURLResponse else {
             throw AppServerClientError.transport("Codex app-server did not return an HTTP response.")
@@ -100,6 +162,7 @@ public final class AppServerWebSocketClient {
     }
 
     public func disconnect(emitEvent: Bool = true) {
+        connectionGeneration += 1
         task?.cancel(with: .goingAway, reason: nil)
         task = nil
         connectionMode = .direct
@@ -304,7 +367,42 @@ public final class AppServerWebSocketClient {
         guard let rawMessage = String(data: data, encoding: .utf8) else {
             throw AppServerClientError.malformedMessage
         }
-        try await task.send(.string(rawMessage))
+        try await sendWebSocketMessage(.string(rawMessage), on: task)
+    }
+
+    private func sendWebSocketMessage(
+        _ message: URLSessionWebSocketTask.Message,
+        on socket: URLSessionWebSocketTask
+    ) async throws {
+        let retryDelays: [UInt64] = [0, 100_000_000, 250_000_000, 500_000_000, 1_000_000_000]
+        var lastError: Error?
+        for delay in retryDelays {
+            if delay > 0 {
+                try await Task.sleep(nanoseconds: delay)
+            }
+            do {
+                try await socket.send(message)
+                return
+            } catch {
+                guard isTransientSocketNotConnected(error) else {
+                    throw error
+                }
+                lastError = error
+            }
+        }
+        throw lastError ?? AppServerClientError.notConnected
+    }
+
+    private func retryDelay(forAttempt attempt: Int) -> UInt64 {
+        UInt64(attempt + 1) * 500_000_000
+    }
+
+    private func isTransientSocketNotConnected(_ error: Error) -> Bool {
+        let nsError = error as NSError
+        if nsError.domain == NSPOSIXErrorDomain && nsError.code == 57 {
+            return true
+        }
+        return nsError.localizedDescription.localizedCaseInsensitiveContains("Socket is not connected")
     }
 
     private func startReceiveLoop() {
@@ -315,11 +413,14 @@ public final class AppServerWebSocketClient {
                     let message = try await task.receive()
                     try await self.handle(webSocketMessage: message)
                 } catch {
-                    self.eventContinuation.yield(.disconnected(error.localizedDescription))
-                    self.failPendingRequests(error)
-                    if self.task === task {
-                        self.task = nil
+                    guard self.task === task else {
+                        return
                     }
+                    if !self.suppressDisconnectEvents {
+                        self.eventContinuation.yield(.disconnected(error.localizedDescription))
+                    }
+                    self.failPendingRequests(error)
+                    self.task = nil
                     return
                 }
             }
@@ -335,7 +436,9 @@ public final class AppServerWebSocketClient {
         if let control = CodexRelayWire.control(from: webSocketMessage) {
             switch control.type {
             case "ping":
-                try await task?.send(CodexRelayWire.pongMessage())
+                if let task {
+                    try await sendWebSocketMessage(CodexRelayWire.pongMessage(), on: task)
+                }
                 return
             case "pong", "register_ack":
                 return
@@ -387,7 +490,7 @@ public final class AppServerWebSocketClient {
         guard let rawMessage = String(data: data, encoding: .utf8) else {
             throw AppServerClientError.malformedMessage
         }
-        try await task.send(.string(rawMessage))
+        try await sendWebSocketMessage(.string(rawMessage), on: task)
     }
 
     private func handle(jsonRPCMessage message: JSONRPCMessage) throws {

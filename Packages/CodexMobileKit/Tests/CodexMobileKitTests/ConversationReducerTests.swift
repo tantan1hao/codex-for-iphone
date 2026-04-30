@@ -225,6 +225,28 @@ final class ConversationReducerTests: XCTestCase {
         XCTAssertEqual(merged.items.map(\.body), ["你好", "你好，我是 Codex。"])
     }
 
+    func testMergingReplacesStreamingTailWhenServerRefreshCompletesTurn() {
+        var existing = ConversationState(threadID: "thr")
+        existing.isRunning = true
+        existing.items = [
+            ConversationItem(id: "older-user", kind: .user, title: "You", body: "之前"),
+            ConversationItem(id: "older-agent", kind: .assistant, title: "Codex", body: "之前的回复"),
+            ConversationItem(id: "optimistic-user", kind: .user, title: "You", body: "Hi", status: "sending"),
+            ConversationItem(id: "stream-agent", kind: .assistant, title: "Codex", body: "Hi，我是谈谈。有什么"),
+        ]
+        var incoming = ConversationState(threadID: "thr")
+        incoming.items = [
+            ConversationItem(id: "server-user", kind: .user, title: "You", body: "Hi"),
+            ConversationItem(id: "server-agent", kind: .assistant, title: "Codex", body: "Hi，我是谈谈。有什么需要我帮你处理？"),
+        ]
+
+        let merged = ConversationReducer.merging(existing: existing, incoming: incoming)
+
+        XCTAssertFalse(merged.isRunning)
+        XCTAssertEqual(merged.items.map(\.id), ["older-user", "older-agent", "server-user", "server-agent"])
+        XCTAssertEqual(merged.items.map(\.body), ["之前", "之前的回复", "Hi", "Hi，我是谈谈。有什么需要我帮你处理？"])
+    }
+
     func testPrependingOlderSkipsOverlappingBoundaryItems() {
         var existing = ConversationState(threadID: "thr")
         existing.items = [

@@ -271,6 +271,8 @@ public enum ConversationReducer {
         if !incoming.items.isEmpty {
             if let replacementRange = matchingRange(in: state.items, pattern: incoming.items) {
                 state.items.replaceSubrange(replacementRange, with: incoming.items)
+            } else if let replacementRange = tailRefreshReplacementRange(in: state.items, incoming: incoming.items) {
+                state.items.replaceSubrange(replacementRange, with: incoming.items)
             } else {
                 for item in incoming.items {
                     upsertOrAppend(&state.items, item: item)
@@ -498,6 +500,25 @@ public enum ConversationReducer {
             if matches {
                 return start..<(start + incoming.count)
             }
+        }
+        return nil
+    }
+
+    private static func tailRefreshReplacementRange(
+        in existing: [ConversationItem],
+        incoming: [ConversationItem]
+    ) -> Range<Int>? {
+        guard !incoming.isEmpty,
+              let firstIncomingKey = semanticFingerprint(incoming[0])
+        else { return nil }
+
+        let searchWindow = max(incoming.count * 3, 8)
+        let lowerBound = max(0, existing.count - searchWindow)
+        guard lowerBound < existing.count else { return nil }
+
+        for start in stride(from: existing.count - 1, through: lowerBound, by: -1) {
+            guard semanticFingerprint(existing[start]) == firstIncomingKey else { continue }
+            return start..<existing.count
         }
         return nil
     }
