@@ -1343,8 +1343,26 @@ extension CodexMobileStore: TerminalFeatureActionProviding, WorkspaceFileDataSou
             },
             stop: { [weak self] in
                 await self?.stopTerminalCommand()
+            },
+            listDirectory: { [weak self] path in
+                guard let self else { throw TerminalFeatureError.unsupported }
+                return try await self.listTerminalDirectory(path: path)
+            },
+            sendEOF: { [weak self] in
+                await self?.sendTerminalEOF()
             }
         )
+    }
+
+    private func listTerminalDirectory(path: String) async throws -> [String] {
+        guard isConnected else { throw TerminalFeatureError.unsupported }
+        let entries = try await client.readDirectory(path: path, includeHidden: false)
+        return entries.map(\.name)
+    }
+
+    private func sendTerminalEOF() async {
+        guard let processID = terminalActiveProcessID, !processID.isEmpty else { return }
+        _ = try? await client.writeCommand(processID: processID, text: "", closeStdin: true)
     }
 
     func refreshAutomations() async {
@@ -1448,8 +1466,9 @@ extension CodexMobileStore: TerminalFeatureActionProviding, WorkspaceFileDataSou
             Task { @MainActor in
                 do {
                     let result = try await client.startCommand(
-                        command: command,
+                        command: "/bin/sh",
                         cwd: cwd,
+                        args: ["-lc", command],
                         timeoutSeconds: 120
                     )
                     if !result.processID.isEmpty {

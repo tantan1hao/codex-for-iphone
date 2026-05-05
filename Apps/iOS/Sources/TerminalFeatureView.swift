@@ -34,28 +34,21 @@ struct TerminalFeatureView: View {
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 10) {
-                Label("Terminal", systemImage: "terminal")
-                    .font(.headline.weight(.semibold))
-                    .foregroundStyle(CodexTheme.text)
-                Spacer(minLength: 8)
-                TerminalStatusBadge(status: state.status)
-            }
-
-            HStack(alignment: .top, spacing: 8) {
-                Image(systemName: "folder")
-                    .foregroundStyle(CodexTheme.secondaryText)
-                    .frame(width: 18)
-                Text(state.displayWorkingDirectory)
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(CodexTheme.secondaryText)
-                    .lineLimit(horizontalSizeClass == .compact ? 2 : 1)
-                    .textSelection(.enabled)
-            }
+        HStack(alignment: .center, spacing: 10) {
+            Image(systemName: "folder")
+                .foregroundStyle(CodexTheme.secondaryText)
+                .frame(width: 16)
+            Text(state.displayWorkingDirectory)
+                .font(.system(.caption, design: .monospaced))
+                .foregroundStyle(CodexTheme.secondaryText)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            TerminalStatusBadge(status: state.status)
         }
         .padding(.horizontal, horizontalSizeClass == .compact ? 16 : 22)
-        .padding(.vertical, 14)
+        .padding(.vertical, 8)
         .background(TerminalColors.panel)
     }
 
@@ -89,53 +82,151 @@ struct TerminalFeatureView: View {
     }
 
     private var commandBar: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 8) {
             if let message = state.statusMessage {
                 TerminalMessageView(message: message, isError: state.status.isError)
             }
 
-            HStack(alignment: .bottom, spacing: 10) {
-                TextField("Command", text: $state.commandText, axis: .vertical)
-                    .font(.system(.body, design: .monospaced))
-                    .lineLimit(1...4)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .submitLabel(.go)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 10)
-                    .background(TerminalColors.field, in: RoundedRectangle(cornerRadius: 8))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 8)
-                            .stroke(TerminalColors.separator, lineWidth: 1)
-                    }
-                    .onSubmit {
-                        runCommand()
-                    }
+            secondaryToolbar
 
-                ViewThatFits(in: .horizontal) {
+            HStack(alignment: .bottom, spacing: 10) {
+                commandTextField
+
+                if horizontalSizeClass == .compact {
+                    primaryActionIconButton
+                } else {
                     HStack(spacing: 8) {
                         runButton
                         stopButton
                         clearButton
                     }
-                    HStack(spacing: 6) {
-                        runIconButton
-                        stopIconButton
-                        clearIconButton
-                    }
                 }
             }
         }
         .padding(.horizontal, horizontalSizeClass == .compact ? 12 : 18)
-        .padding(.vertical, 12)
+        .padding(.vertical, 10)
         .background(TerminalColors.panel)
+    }
+
+    private var commandTextField: some View {
+        TextField("命令", text: $state.commandText, axis: .vertical)
+            .font(.system(.body, design: .monospaced))
+            .lineLimit(1...4)
+            .textInputAutocapitalization(.never)
+            .autocorrectionDisabled()
+            .submitLabel(.go)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(TerminalColors.field, in: RoundedRectangle(cornerRadius: 8))
+            .overlay {
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(TerminalColors.separator, lineWidth: 1)
+            }
+            .onSubmit {
+                runCommand()
+            }
+            .onKeyPress { press in
+                handleKeyPress(press)
+            }
+    }
+
+    private func handleKeyPress(_ press: KeyPress) -> KeyPress.Result {
+        if press.modifiers.contains(.control) {
+            switch press.characters {
+            case "c", "C":
+                stopCommand()
+                return .handled
+            case "d", "D":
+                triggerEOF()
+                return .handled
+            default:
+                break
+            }
+        }
+        switch press.key {
+        case .upArrow:
+            state.recallPrevious()
+            return .handled
+        case .downArrow:
+            state.recallNext()
+            return .handled
+        case .tab:
+            triggerCompletion()
+            return .handled
+        default:
+            return .ignored
+        }
+    }
+
+    private var secondaryToolbar: some View {
+        HStack(spacing: 6) {
+            toolbarIconButton(
+                systemName: "chevron.up",
+                label: "上一条历史",
+                enabled: state.canRecallPrevious
+            ) {
+                state.recallPrevious()
+            }
+            toolbarIconButton(
+                systemName: "chevron.down",
+                label: "下一条历史",
+                enabled: state.canRecallNext
+            ) {
+                state.recallNext()
+            }
+            toolbarIconButton(
+                systemName: "arrow.right.to.line.compact",
+                label: "Tab 补全",
+                enabled: !state.isCompletionInFlight
+            ) {
+                triggerCompletion()
+            }
+            toolbarIconButton(
+                systemName: "xmark.octagon",
+                label: "Ctrl+C",
+                enabled: state.canStop
+            ) {
+                stopCommand()
+            }
+            toolbarIconButton(
+                systemName: "rectangle.righthalf.inset.filled.arrow.right",
+                label: "Ctrl+D",
+                enabled: state.canStop
+            ) {
+                triggerEOF()
+            }
+            Spacer(minLength: 4)
+            toolbarIconButton(
+                systemName: "trash",
+                label: "清空",
+                enabled: !state.lines.isEmpty
+            ) {
+                state.clear()
+            }
+        }
+    }
+
+    private func toolbarIconButton(
+        systemName: String,
+        label: String,
+        enabled: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: 14, weight: .semibold))
+                .frame(width: 32, height: 30)
+        }
+        .buttonStyle(TerminalButtonStyle(kind: .secondary))
+        .disabled(!enabled)
+        .accessibilityLabel(label)
     }
 
     private var runButton: some View {
         Button {
             runCommand()
         } label: {
-            Label("Run", systemImage: "play.fill")
+            Label("运行", systemImage: "play.fill")
         }
         .buttonStyle(TerminalButtonStyle(kind: .primary))
         .disabled(!state.canRun)
@@ -145,7 +236,7 @@ struct TerminalFeatureView: View {
         Button {
             stopCommand()
         } label: {
-            Label("Stop", systemImage: "stop.fill")
+            Label("停止", systemImage: "stop.fill")
         }
         .buttonStyle(TerminalButtonStyle(kind: .destructive))
         .disabled(!state.canStop)
@@ -155,46 +246,34 @@ struct TerminalFeatureView: View {
         Button {
             state.clear()
         } label: {
-            Label("Clear", systemImage: "trash")
+            Label("清空", systemImage: "trash")
         }
         .buttonStyle(TerminalButtonStyle(kind: .secondary))
         .disabled(state.lines.isEmpty)
     }
 
-    private var runIconButton: some View {
-        Button {
-            runCommand()
-        } label: {
-            Image(systemName: "play.fill")
-                .frame(width: 38, height: 38)
+    @ViewBuilder
+    private var primaryActionIconButton: some View {
+        if state.canStop {
+            Button {
+                stopCommand()
+            } label: {
+                Image(systemName: "stop.fill")
+                    .frame(width: 38, height: 38)
+            }
+            .buttonStyle(TerminalButtonStyle(kind: .destructive))
+            .accessibilityLabel("停止")
+        } else {
+            Button {
+                runCommand()
+            } label: {
+                Image(systemName: "play.fill")
+                    .frame(width: 38, height: 38)
+            }
+            .buttonStyle(TerminalButtonStyle(kind: .primary))
+            .disabled(!state.canRun)
+            .accessibilityLabel("运行")
         }
-        .buttonStyle(TerminalButtonStyle(kind: .primary))
-        .disabled(!state.canRun)
-        .accessibilityLabel("Run")
-    }
-
-    private var stopIconButton: some View {
-        Button {
-            stopCommand()
-        } label: {
-            Image(systemName: "stop.fill")
-                .frame(width: 38, height: 38)
-        }
-        .buttonStyle(TerminalButtonStyle(kind: .destructive))
-        .disabled(!state.canStop)
-        .accessibilityLabel("Stop")
-    }
-
-    private var clearIconButton: some View {
-        Button {
-            state.clear()
-        } label: {
-            Image(systemName: "trash")
-                .frame(width: 38, height: 38)
-        }
-        .buttonStyle(TerminalButtonStyle(kind: .secondary))
-        .disabled(state.lines.isEmpty)
-        .accessibilityLabel("Clear")
     }
 
     private var actions: TerminalFeatureActions {
@@ -230,6 +309,18 @@ struct TerminalFeatureView: View {
             await state.stop(actions: actions)
         }
     }
+
+    private func triggerCompletion() {
+        Task {
+            await state.requestCompletion(actions: actions)
+        }
+    }
+
+    private func triggerEOF() {
+        Task {
+            await state.sendEOF(actions: actions)
+        }
+    }
 }
 
 @MainActor
@@ -240,13 +331,21 @@ protocol TerminalFeatureActionProviding: AnyObject {
 struct TerminalFeatureActions {
     var run: @Sendable @MainActor (TerminalCommandRequest) async throws -> AsyncThrowingStream<TerminalCommandEvent, Error>
     var stop: @Sendable @MainActor () async -> Void
+    var listDirectory: @Sendable @MainActor (String) async throws -> [String]
+    var sendEOF: @Sendable @MainActor () async -> Void
 
     init(
         run: @escaping @Sendable @MainActor (TerminalCommandRequest) async throws -> AsyncThrowingStream<TerminalCommandEvent, Error>,
-        stop: @escaping @Sendable @MainActor () async -> Void = {}
+        stop: @escaping @Sendable @MainActor () async -> Void = {},
+        listDirectory: @escaping @Sendable @MainActor (String) async throws -> [String] = { _ in
+            throw TerminalFeatureError.unsupported
+        },
+        sendEOF: @escaping @Sendable @MainActor () async -> Void = {}
     ) {
         self.run = run
         self.stop = stop
+        self.listDirectory = listDirectory
+        self.sendEOF = sendEOF
     }
 
     static let unsupported = TerminalFeatureActions(
@@ -274,7 +373,7 @@ enum TerminalFeatureError: LocalizedError, Sendable {
     var errorDescription: String? {
         switch self {
         case .unsupported:
-            "Terminal command execution is not wired to app-server command/exec in this build."
+            "当前版本未接入 app-server 的 command/exec 接口，无法执行命令。"
         }
     }
 }
@@ -285,8 +384,12 @@ final class TerminalFeatureState: ObservableObject {
     @Published private(set) var workingDirectory = ""
     @Published private(set) var lines: [TerminalOutputLine] = []
     @Published private(set) var status: TerminalRunStatus = .idle
+    @Published private(set) var isCompletionInFlight = false
 
     private var runTask: Task<Void, Never>?
+    private var commandHistory: [String] = []
+    private var historyCursor: Int?
+    private let historyLimit = 200
 
     var canRun: Bool {
         !trimmedCommand.isEmpty && !status.isBusy
@@ -296,8 +399,17 @@ final class TerminalFeatureState: ObservableObject {
         status.isBusy
     }
 
+    var canRecallPrevious: Bool {
+        guard !commandHistory.isEmpty else { return false }
+        return (historyCursor ?? commandHistory.count) > 0
+    }
+
+    var canRecallNext: Bool {
+        historyCursor != nil
+    }
+
     var displayWorkingDirectory: String {
-        workingDirectory.isEmpty ? "No workspace selected" : workingDirectory
+        workingDirectory.isEmpty ? "未选择工作区" : workingDirectory
     }
 
     var scrollAnchorID: TerminalOutputLine.ID? {
@@ -321,6 +433,14 @@ final class TerminalFeatureState: ObservableObject {
         let command = trimmedCommand
         guard !command.isEmpty, !status.isBusy else { return }
 
+        if commandHistory.last != command {
+            commandHistory.append(command)
+            if commandHistory.count > historyLimit {
+                commandHistory.removeFirst(commandHistory.count - historyLimit)
+            }
+        }
+        historyCursor = nil
+
         status = .running
         append(command, stream: .interaction, prefix: "$")
         commandText = ""
@@ -333,10 +453,61 @@ final class TerminalFeatureState: ObservableObject {
         }
     }
 
+    func recallPrevious() {
+        guard !commandHistory.isEmpty else { return }
+        let nextIndex = (historyCursor ?? commandHistory.count) - 1
+        guard nextIndex >= 0 else { return }
+        historyCursor = nextIndex
+        commandText = commandHistory[nextIndex]
+    }
+
+    func recallNext() {
+        guard let cursor = historyCursor else { return }
+        let nextIndex = cursor + 1
+        if nextIndex >= commandHistory.count {
+            historyCursor = nil
+            commandText = ""
+        } else {
+            historyCursor = nextIndex
+            commandText = commandHistory[nextIndex]
+        }
+    }
+
+    func requestCompletion(actions: TerminalFeatureActions) async {
+        guard !isCompletionInFlight else { return }
+        let token = currentCompletionToken()
+        let (directory, prefix) = resolveCompletionTarget(token: token)
+        guard !directory.isEmpty else { return }
+        isCompletionInFlight = true
+        defer { isCompletionInFlight = false }
+        do {
+            let entries = try await actions.listDirectory(directory)
+            let matches = entries.filter { $0.hasPrefix(prefix) }.sorted()
+            if matches.isEmpty {
+                append("无补全候选", stream: .interaction, prefix: nil)
+            } else if matches.count == 1 {
+                applyCompletion(token: token, replacement: matches[0])
+            } else {
+                let common = Self.longestCommonPrefix(matches)
+                if common.count > prefix.count {
+                    applyCompletion(token: token, replacement: common)
+                }
+                append("候选：" + matches.joined(separator: "  "), stream: .interaction, prefix: nil)
+            }
+        } catch {
+            append("补全失败：\(error.localizedDescription)", stream: .stderr, prefix: nil)
+        }
+    }
+
+    func sendEOF(actions: TerminalFeatureActions) async {
+        await actions.sendEOF()
+        append("已发送 EOF (^D)", stream: .interaction, prefix: nil)
+    }
+
     func stop(actions: TerminalFeatureActions) async {
         guard status.isBusy else { return }
         status = .stopping
-        append("stop requested", stream: .interaction, prefix: nil)
+        append("已请求停止", stream: .interaction, prefix: nil)
         runTask?.cancel()
         await actions.stop()
         status = .idle
@@ -397,11 +568,11 @@ final class TerminalFeatureState: ObservableObject {
             return false
         case let .completed(exitCode):
             if let exitCode, exitCode != 0 {
-                let message = "Process exited with code \(exitCode)."
+                let message = "进程已退出（退出码 \(exitCode)）"
                 append(message, stream: .stderr, prefix: nil)
                 status = .failed(message)
             } else if let exitCode {
-                append("Process exited with code \(exitCode).", stream: .interaction, prefix: nil)
+                append("进程已退出（退出码 \(exitCode)）", stream: .interaction, prefix: nil)
                 status = .idle
             } else {
                 status = .idle
@@ -431,6 +602,68 @@ final class TerminalFeatureState: ObservableObject {
 
     private var trimmedCommand: String {
         commandText.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func currentCompletionToken() -> String {
+        let scalars = commandText.unicodeScalars
+        let endIndex = scalars.endIndex
+        var startIndex = endIndex
+        while startIndex > scalars.startIndex {
+            let prev = scalars.index(before: startIndex)
+            if CharacterSet.whitespacesAndNewlines.contains(scalars[prev]) { break }
+            startIndex = prev
+        }
+        return String(String.UnicodeScalarView(scalars[startIndex..<endIndex]))
+    }
+
+    private func resolveCompletionTarget(token: String) -> (directory: String, prefix: String) {
+        let cwd = workingDirectory.isEmpty ? "/" : workingDirectory
+        if token.isEmpty {
+            return (cwd, "")
+        }
+        if let lastSlash = token.lastIndex(of: "/") {
+            let pathPart = String(token[..<lastSlash])
+            let prefix = String(token[token.index(after: lastSlash)...])
+            let directory: String
+            if pathPart.isEmpty {
+                directory = "/"
+            } else if pathPart.hasPrefix("/") {
+                directory = pathPart
+            } else if pathPart.hasPrefix("~") {
+                directory = NSString(string: pathPart).expandingTildeInPath
+            } else {
+                directory = cwd + "/" + pathPart
+            }
+            return (directory, prefix)
+        }
+        return (cwd, token)
+    }
+
+    private func applyCompletion(token: String, replacement: String) {
+        guard !token.isEmpty || !replacement.isEmpty else { return }
+        let head = String(commandText.dropLast(token.count))
+        var combined = head + token
+        combined.removeLast(token.count)
+        let replaced: String
+        if let lastSlash = token.lastIndex(of: "/") {
+            let pathPart = String(token[...lastSlash])
+            replaced = combined + pathPart + replacement
+        } else {
+            replaced = combined + replacement
+        }
+        commandText = replaced
+    }
+
+    private static func longestCommonPrefix(_ strings: [String]) -> String {
+        guard let first = strings.first else { return "" }
+        var prefix = first
+        for value in strings.dropFirst() {
+            while !value.hasPrefix(prefix) {
+                prefix = String(prefix.dropLast())
+                if prefix.isEmpty { return "" }
+            }
+        }
+        return prefix
     }
 }
 
@@ -521,15 +754,15 @@ private struct TerminalStatusBadge: View {
     private var title: String {
         switch status {
         case .idle:
-            "Idle"
+            "空闲"
         case .running:
-            "Running"
+            "运行中"
         case .stopping:
-            "Stopping"
+            "停止中"
         case .failed:
-            "Error"
+            "错误"
         case .unsupported:
-            "Unsupported"
+            "不可用"
         }
     }
 
@@ -577,14 +810,14 @@ private struct TerminalPlaceholderView: View {
             Image(systemName: "terminal")
                 .font(.title2)
                 .foregroundStyle(CodexTheme.secondaryText)
-            Text("No terminal output yet.")
+            Text("暂无终端输出")
                 .font(.callout.weight(.semibold))
                 .foregroundStyle(CodexTheme.text)
-            Text("Run a command after the app-server command/exec hook is wired.")
+            Text("在下方输入命令并执行，输出会显示在这里。")
                 .font(.caption)
                 .foregroundStyle(CodexTheme.secondaryText)
         }
-        .frame(maxWidth: .infinity, minHeight: 220, alignment: .center)
+        .frame(maxWidth: .infinity, minHeight: 140, alignment: .center)
     }
 }
 

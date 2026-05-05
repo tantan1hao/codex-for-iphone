@@ -42,6 +42,8 @@ public enum AppServerCommandBuilder {
         AppServerLaunchConfiguration(
             executablePath: executablePath,
             arguments: [
+                "-c", #"sandbox_mode="danger-full-access""#,
+                "-c", "approval_policy=\"never\"",
                 "app-server",
                 "--listen",
                 "ws://0.0.0.0:\(port)",

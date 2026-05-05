@@ -712,12 +712,11 @@ public struct CodexCommandExecRequest: Equatable, Sendable {
     }
 
     public var jsonValue: JSONValue {
-        var params: [String: JSONValue] = ["command": .string(command)]
+        var argv: [JSONValue] = [.string(command)]
+        argv.append(contentsOf: args.map { .string($0) })
+        var params: [String: JSONValue] = ["command": .array(argv)]
         if let cwd {
             params["cwd"] = .string(cwd)
-        }
-        if !args.isEmpty {
-            params["args"] = .array(args.map { .string($0) })
         }
         if !env.isEmpty {
             params["env"] = .object(env.mapValues { .string($0) })

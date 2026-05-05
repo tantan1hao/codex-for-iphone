@@ -54,10 +54,45 @@ final class HelperController: ObservableObject {
     private var process: Process?
     private var readinessTask: Task<Void, Never>?
     private var relayBridge: AppServerRelayBridge?
+    private var autostartTask: Task<Void, Never>?
+
+    init() {
+        if Self.shouldAutostart {
+            autostartTask = Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .milliseconds(50))
+                guard let self else { return }
+                self.start()
+                await self.writePairingURLWhenReady()
+            }
+        }
+    }
 
     deinit {
         process?.terminate()
         readinessTask?.cancel()
+        autostartTask?.cancel()
+    }
+
+    private static var shouldAutostart: Bool {
+        CommandLine.arguments.contains("--autostart") ||
+            ProcessInfo.processInfo.environment["CODEX_HELPER_AUTOSTART"] == "1"
+    }
+
+    private static var pairingURLFilePath: String {
+        ProcessInfo.processInfo.environment["CODEX_HELPER_PAIRING_FILE"]
+            ?? "/tmp/codex-mobile-pairing-url"
+    }
+
+    @MainActor
+    private func writePairingURLWhenReady() async {
+        for _ in 0..<120 {
+            if case .ready = status, let url = pairingPayload?.deepLinkURL.absoluteString {
+                try? url.write(toFile: Self.pairingURLFilePath, atomically: true, encoding: .utf8)
+                return
+            }
+            if case .failed = status { return }
+            try? await Task.sleep(for: .milliseconds(500))
+        }
     }
 
     func chooseWorkspace() {
