@@ -23,6 +23,47 @@ public extension AppServerWebSocketClient {
     }
 
     @discardableResult
+    func listLocalAutomationTasks(rootPath: String) async throws -> [CodexAutomationTaskSummary] {
+        let entries: [CodexRemoteFileEntry]
+        do {
+            entries = try await readDirectory(path: rootPath, includeHidden: false)
+        } catch {
+            guard Self.isMissingFileError(error) else { throw error }
+            return try await listLocalAutomationTasksFromShell()
+        }
+
+        var tasks: [CodexAutomationTaskSummary] = []
+        for entry in entries where entry.isDirectory && !entry.name.hasPrefix(".") {
+            let directoryPath = entry.path.isEmpty ? "\(rootPath)/\(entry.name)" : entry.path
+            let fallbackID = entry.name.isEmpty ? URL(fileURLWithPath: directoryPath).lastPathComponent : entry.name
+            do {
+                let file = try await readFile(path: "\(directoryPath)/automation.toml")
+                guard let text = file.decodedText,
+                      let task = CodexAutomationTaskSummary.parseAutomationTOML(text, fallbackID: fallbackID)
+                else { continue }
+                tasks.append(task)
+            } catch {
+                guard Self.isMissingFileError(error) else { throw error }
+            }
+        }
+
+        if tasks.isEmpty {
+            return try await listLocalAutomationTasksFromShell()
+        }
+        return Self.sortedAutomationTasks(tasks)
+    }
+
+    @discardableResult
+    func listLocalAutomationTasksFromShell() async throws -> [CodexAutomationTaskSummary] {
+        let result = try await startCommand(command: "/bin/sh", args: ["-lc", Self.localAutomationListCommand], timeoutSeconds: 10)
+        if let exitCode = result.exitCode, exitCode != 0 {
+            let message = result.stderr?.isEmpty == false ? result.stderr! : "Codex app-server command/exec could not read local automations."
+            throw AppServerClientError.transport(message)
+        }
+        return Self.sortedAutomationTasks(CodexAutomationTaskSummary.parseAutomationTOMLDump(result.output ?? ""))
+    }
+
+    @discardableResult
     func getUsageQuota() async throws -> CodexUsageQuota {
         let response = try await sendFeatureRequest(methods: Self.usageQuotaMethods)
         guard let quota = CodexUsageQuota.parse(response) else {
@@ -76,7 +117,19 @@ public extension AppServerWebSocketClient {
         rows: Int? = nil,
         timeoutSeconds: Double? = nil
     ) async throws -> CodexCommandExecResult {
-        try await startCommand(
+        if args.isEmpty {
+            return try await startCommand(
+                command: "/bin/sh",
+                cwd: cwd,
+                args: ["-lc", command],
+                env: env,
+                stdin: stdin,
+                cols: cols,
+                rows: rows,
+                timeoutSeconds: timeoutSeconds
+            )
+        }
+        return try await startCommand(
             CodexCommandExecRequest(
                 command: command,
                 cwd: cwd,
@@ -166,8 +219,6 @@ private extension CodexCollaborationMode {
 
 private extension AppServerWebSocketClient {
     static let automationListMethods = [
-        "tasks/list",
-        "task/list",
         "automations/list",
         "automation/list",
         "automation/tasks/list",
@@ -175,8 +226,6 @@ private extension AppServerWebSocketClient {
     ]
 
     static let automationGetMethods = [
-        "tasks/get",
-        "task/get",
         "automations/get",
         "automation/get",
         "automation/tasks/get",
@@ -218,5 +267,29 @@ private extension AppServerWebSocketClient {
             message.localizedCaseInsensitiveContains("not found") ||
             message.localizedCaseInsensitiveContains("unknown") ||
             message.localizedCaseInsensitiveContains("unsupported")
+    }
+
+    static func isMissingFileError(_ error: Error) -> Bool {
+        let message = error.localizedDescription
+        return message.localizedCaseInsensitiveContains("no such file") ||
+            message.localizedCaseInsensitiveContains("not found") ||
+            message.localizedCaseInsensitiveContains("does not exist")
+    }
+
+    static let localAutomationListCommand = #"for file in "$HOME"/.codex/automations/*/automation.toml; do [ -f "$file" ] || continue; printf "__CODEX_MOBILE_AUTOMATION_BEGIN__ %s\n" "$file"; cat "$file"; printf "\n__CODEX_MOBILE_AUTOMATION_END__\n"; done"#
+
+    static func sortedAutomationTasks(_ tasks: [CodexAutomationTaskSummary]) -> [CodexAutomationTaskSummary] {
+        tasks.sorted { lhs, rhs in
+            switch (lhs.updatedAt, rhs.updatedAt) {
+            case let (left?, right?):
+                return left > right
+            case (_?, nil):
+                return true
+            case (nil, _?):
+                return false
+            case (nil, nil):
+                return lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending
+            }
+        }
     }
 }

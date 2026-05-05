@@ -493,6 +493,263 @@ public struct CodexAutomationTaskSummary: Identifiable, Equatable, Sendable {
             raw: value
         )
     }
+
+    public static func parseAutomationTOML(_ toml: String, fallbackID: String? = nil) -> CodexAutomationTaskSummary? {
+        var object = parseTopLevelTOML(toml)
+        let id = CodexFeatureParsing.string(object, keys: ["id", "automation_id", "key"]) ?? fallbackID ?? ""
+        guard !id.isEmpty else { return nil }
+        if object["id"] == nil {
+            object["id"] = .string(id)
+        }
+        let status = CodexFeatureParsing.string(object, keys: ["status", "state"]) ?? "unknown"
+        let enabled = isEnabled(status: status) ?? CodexFeatureParsing.bool(object, keys: ["enabled", "is_enabled"])
+
+        return CodexAutomationTaskSummary(
+            id: id,
+            title: CodexFeatureParsing.string(object, keys: ["name", "title", "displayName", "label"]) ?? id,
+            status: status,
+            schedule: CodexFeatureParsing.string(object, keys: ["rrule", "schedule", "cron", "cadence"]),
+            prompt: CodexFeatureParsing.string(object, keys: ["prompt", "instructions", "instruction", "description"]),
+            createdAt: tomlDate(object, keys: ["created_at", "createdAt"]),
+            updatedAt: tomlDate(object, keys: ["updated_at", "updatedAt"]),
+            isEnabled: enabled,
+            raw: .object(object)
+        )
+    }
+
+    public static func parseAutomationTOMLDump(_ dump: String) -> [CodexAutomationTaskSummary] {
+        let beginPrefix = "__CODEX_MOBILE_AUTOMATION_BEGIN__ "
+        let endMarker = "__CODEX_MOBILE_AUTOMATION_END__"
+        var tasks: [CodexAutomationTaskSummary] = []
+        var currentPath: String?
+        var currentLines: [String] = []
+
+        func flushCurrentTask() {
+            guard let path = currentPath else { return }
+            let fallbackID = URL(fileURLWithPath: path).deletingLastPathComponent().lastPathComponent
+            if let task = parseAutomationTOML(currentLines.joined(separator: "\n"), fallbackID: fallbackID) {
+                tasks.append(task)
+            }
+            currentPath = nil
+            currentLines = []
+        }
+
+        for line in dump.components(separatedBy: .newlines) {
+            if line.hasPrefix(beginPrefix) {
+                flushCurrentTask()
+                currentPath = String(line.dropFirst(beginPrefix.count))
+                currentLines = []
+            } else if line == endMarker {
+                flushCurrentTask()
+            } else if currentPath != nil {
+                currentLines.append(line)
+            }
+        }
+        flushCurrentTask()
+        return tasks
+    }
+
+    private static func isEnabled(status: String) -> Bool? {
+        switch status.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "enabled", "active", "running", "scheduled":
+            true
+        case "disabled", "paused", "pause", "inactive":
+            false
+        default:
+            nil
+        }
+    }
+
+    private static func tomlDate(_ object: [String: JSONValue], keys: [String]) -> Date? {
+        for key in keys {
+            guard let value = object[key] else { continue }
+            if let number = value.numberValue {
+                return Date(timeIntervalSince1970: normalizedUnixTimestamp(number))
+            }
+            if let string = value.stringValue {
+                if let number = Double(string) {
+                    return Date(timeIntervalSince1970: normalizedUnixTimestamp(number))
+                }
+                if let date = ISO8601DateFormatter().date(from: string) {
+                    return date
+                }
+            }
+        }
+        return nil
+    }
+
+    private static func normalizedUnixTimestamp(_ value: Double) -> Double {
+        abs(value) > 10_000_000_000 ? value / 1_000 : value
+    }
+
+    private static func parseTopLevelTOML(_ toml: String) -> [String: JSONValue] {
+        var result: [String: JSONValue] = [:]
+        let lines = toml.components(separatedBy: .newlines)
+        var index = 0
+        while index < lines.count {
+            var line = stripTOMLComment(lines[index]).trimmingCharacters(in: .whitespacesAndNewlines)
+            index += 1
+            guard !line.isEmpty, !line.hasPrefix("[") else { continue }
+            guard let separator = line.firstIndex(of: "=") else { continue }
+            let key = line[..<separator].trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !key.isEmpty else { continue }
+            var rawValue = line[line.index(after: separator)...].trimmingCharacters(in: .whitespacesAndNewlines)
+
+            if rawValue.hasPrefix("\"\"\""), !rawValue.dropFirst(3).contains("\"\"\"") {
+                while index < lines.count {
+                    let nextLine = lines[index]
+                    rawValue += "\n" + nextLine
+                    index += 1
+                    if nextLine.contains("\"\"\"") { break }
+                }
+                line = rawValue
+                rawValue = line
+            }
+
+            result[String(key)] = parseTOMLValue(String(rawValue))
+        }
+        return result
+    }
+
+    private static func stripTOMLComment(_ line: String) -> String {
+        var output = ""
+        var isInBasicString = false
+        var isInLiteralString = false
+        var isEscaped = false
+        for character in line {
+            if isEscaped {
+                output.append(character)
+                isEscaped = false
+                continue
+            }
+            if character == "\\" && isInBasicString {
+                output.append(character)
+                isEscaped = true
+                continue
+            }
+            if character == "\"", !isInLiteralString {
+                isInBasicString.toggle()
+                output.append(character)
+                continue
+            }
+            if character == "'", !isInBasicString {
+                isInLiteralString.toggle()
+                output.append(character)
+                continue
+            }
+            if character == "#", !isInBasicString, !isInLiteralString {
+                break
+            }
+            output.append(character)
+        }
+        return output
+    }
+
+    private static func parseTOMLValue(_ rawValue: String) -> JSONValue {
+        let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasPrefix("\"\"\""), trimmed.hasSuffix("\"\"\""), trimmed.count >= 6 {
+            let inner = String(trimmed.dropFirst(3).dropLast(3))
+            return .string(unescapeBasicTOMLString(inner))
+        }
+        if trimmed.hasPrefix("'''"), trimmed.hasSuffix("'''"), trimmed.count >= 6 {
+            return .string(String(trimmed.dropFirst(3).dropLast(3)))
+        }
+        if trimmed.hasPrefix("\""), trimmed.hasSuffix("\""), trimmed.count >= 2 {
+            let inner = String(trimmed.dropFirst().dropLast())
+            return .string(unescapeBasicTOMLString(inner))
+        }
+        if trimmed.hasPrefix("'"), trimmed.hasSuffix("'"), trimmed.count >= 2 {
+            return .string(String(trimmed.dropFirst().dropLast()))
+        }
+        if trimmed.hasPrefix("["), trimmed.hasSuffix("]") {
+            return .array(parseTOMLArray(String(trimmed.dropFirst().dropLast())))
+        }
+        switch trimmed.lowercased() {
+        case "true":
+            return .bool(true)
+        case "false":
+            return .bool(false)
+        default:
+            if let number = Double(trimmed.replacingOccurrences(of: "_", with: "")) {
+                return .number(number)
+            }
+            return .string(trimmed)
+        }
+    }
+
+    private static func parseTOMLArray(_ rawValue: String) -> [JSONValue] {
+        var items: [JSONValue] = []
+        var current = ""
+        var isInBasicString = false
+        var isInLiteralString = false
+        var isEscaped = false
+        for character in rawValue {
+            if isEscaped {
+                current.append(character)
+                isEscaped = false
+                continue
+            }
+            if character == "\\" && isInBasicString {
+                current.append(character)
+                isEscaped = true
+                continue
+            }
+            if character == "\"", !isInLiteralString {
+                isInBasicString.toggle()
+                current.append(character)
+                continue
+            }
+            if character == "'", !isInBasicString {
+                isInLiteralString.toggle()
+                current.append(character)
+                continue
+            }
+            if character == ",", !isInBasicString, !isInLiteralString {
+                let value = current.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !value.isEmpty {
+                    items.append(parseTOMLValue(value))
+                }
+                current = ""
+                continue
+            }
+            current.append(character)
+        }
+        let value = current.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !value.isEmpty {
+            items.append(parseTOMLValue(value))
+        }
+        return items
+    }
+
+    private static func unescapeBasicTOMLString(_ value: String) -> String {
+        var output = ""
+        var iterator = value.makeIterator()
+        while let character = iterator.next() {
+            guard character == "\\", let escaped = iterator.next() else {
+                output.append(character)
+                continue
+            }
+            switch escaped {
+            case "b":
+                output.append("\u{0008}")
+            case "t":
+                output.append("\t")
+            case "n":
+                output.append("\n")
+            case "f":
+                output.append("\u{000C}")
+            case "r":
+                output.append("\r")
+            case "\"":
+                output.append("\"")
+            case "\\":
+                output.append("\\")
+            default:
+                output.append(escaped)
+            }
+        }
+        return output
+    }
 }
 
 public struct CodexRemoteFileEntry: Identifiable, Equatable, Sendable {
@@ -712,12 +969,11 @@ public struct CodexCommandExecRequest: Equatable, Sendable {
     }
 
     public var jsonValue: JSONValue {
-        var params: [String: JSONValue] = ["command": .string(command)]
+        var params: [String: JSONValue] = [
+            "command": .array(([command] + args).map { .string($0) }),
+        ]
         if let cwd {
             params["cwd"] = .string(cwd)
-        }
-        if !args.isEmpty {
-            params["args"] = .array(args.map { .string($0) })
         }
         if !env.isEmpty {
             params["env"] = .object(env.mapValues { .string($0) })
@@ -725,14 +981,14 @@ public struct CodexCommandExecRequest: Equatable, Sendable {
         if let stdin {
             params["stdin"] = .string(stdin)
         }
-        if let cols {
-            params["cols"] = .number(Double(cols))
-        }
-        if let rows {
-            params["rows"] = .number(Double(rows))
+        if let cols, let rows {
+            params["size"] = [
+                "cols": .number(Double(cols)),
+                "rows": .number(Double(rows)),
+            ]
         }
         if let timeoutSeconds {
-            params["timeoutSeconds"] = .number(timeoutSeconds)
+            params["timeoutMs"] = .number(timeoutSeconds * 1_000)
         }
         return .object(params)
     }

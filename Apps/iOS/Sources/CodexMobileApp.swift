@@ -1354,13 +1354,31 @@ extension CodexMobileStore: TerminalFeatureActionProviding, WorkspaceFileDataSou
         }
         automationsState = .loading
         do {
-            let tasks = try await client.listAutomationTasks()
+            let tasks = try await loadAutomationTasks()
             automationsState = .loaded(
                 automations: tasks.map(automationViewModel),
                 lastUpdated: formattedNow()
             )
         } catch {
             automationsState = unsupportedOrErrorState(error)
+        }
+    }
+
+    private func loadAutomationTasks() async throws -> [CodexAutomationTaskSummary] {
+        do {
+            let tasks = try await client.listAutomationTasks()
+            if tasks.isEmpty,
+               let rootPath = localAutomationStoreRootPath()
+            {
+                let localTasks = try await client.listLocalAutomationTasks(rootPath: rootPath)
+                return localTasks.isEmpty ? tasks : localTasks
+            }
+            return tasks
+        } catch {
+            guard isUnsupportedAutomationListError(error),
+                  let rootPath = localAutomationStoreRootPath()
+            else { throw error }
+            return try await client.listLocalAutomationTasks(rootPath: rootPath)
         }
     }
 
@@ -1580,14 +1598,23 @@ extension CodexMobileStore: TerminalFeatureActionProviding, WorkspaceFileDataSou
 
     private func unsupportedOrErrorState(_ error: Error) -> AutomationsFeatureView.ContentState {
         let message = error.localizedDescription
-        if message.localizedCaseInsensitiveContains("method") ||
-            message.localizedCaseInsensitiveContains("not found") ||
-            message.localizedCaseInsensitiveContains("unknown") ||
-            message.localizedCaseInsensitiveContains("unsupported")
-        {
+        if isUnsupportedAutomationListError(error) {
             return .unsupported(message: "当前 Codex app-server 不支持自动化列表接口。")
         }
         return .error(message: message, lastUpdated: formattedNow())
+    }
+
+    private func isUnsupportedAutomationListError(_ error: Error) -> Bool {
+        if case let AppServerClientError.requestFailed(rpcError) = error,
+           rpcError.code == -32601
+        {
+            return true
+        }
+        let message = error.localizedDescription
+        return message.localizedCaseInsensitiveContains("method") ||
+            message.localizedCaseInsensitiveContains("not found") ||
+            message.localizedCaseInsensitiveContains("unknown") ||
+            message.localizedCaseInsensitiveContains("unsupported")
     }
 
     private func usageQuotaUnsupportedOrErrorState(_ error: Error) -> UsageQuotaContentState {
@@ -1733,6 +1760,26 @@ extension CodexMobileStore: TerminalFeatureActionProviding, WorkspaceFileDataSou
     private func normalizedAbsolutePath(_ path: String) -> String {
         let sanitized = sanitizedWorkspaceRelativePath(path)
         return sanitized.isEmpty ? "/" : "/" + sanitized
+    }
+
+    private func localAutomationStoreRootPath() -> String? {
+        guard let homeDirectory = inferredHomeDirectory(from: pairing?.cwd ?? "") else { return nil }
+        return "\(homeDirectory)/.codex/automations"
+    }
+
+    private func inferredHomeDirectory(from cwd: String) -> String? {
+        let absolute = normalizedAbsolutePath(cwd)
+        let components = absolute.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+        if components.count >= 2, components[0] == "Users" {
+            return "/Users/\(components[1])"
+        }
+        if components.first == "root" {
+            return "/root"
+        }
+        if components.count >= 2, components[0] == "var", components[1] == "root" {
+            return "/var/root"
+        }
+        return nil
     }
 
     func formattedNow() -> String {

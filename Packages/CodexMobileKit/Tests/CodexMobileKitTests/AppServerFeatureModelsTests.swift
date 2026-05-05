@@ -149,6 +149,67 @@ final class AppServerFeatureModelsTests: XCTestCase {
         XCTAssertNotNil(task.nextRunAt)
     }
 
+    func testParsesLocalAutomationToml() throws {
+        let toml = #"""
+        version = 1
+        id = "b-ai-pdf"
+        kind = "cron"
+        name = "B站 ai 收藏夹前三视频制 PDF"
+        prompt = "第一行\n第二行"
+        status = "PAUSED"
+        rrule = "RRULE:FREQ=WEEKLY;BYHOUR=9;BYMINUTE=0"
+        model = "gpt-5.4"
+        cwds = ["/Users/mac"]
+        created_at = 1777024664433
+        updated_at = 1777025079767
+        """#
+
+        let task = try XCTUnwrap(CodexAutomationTaskSummary.parseAutomationTOML(toml, fallbackID: "fallback"))
+        XCTAssertEqual(task.id, "b-ai-pdf")
+        XCTAssertEqual(task.title, "B站 ai 收藏夹前三视频制 PDF")
+        XCTAssertEqual(task.status, "PAUSED")
+        XCTAssertEqual(task.schedule, "RRULE:FREQ=WEEKLY;BYHOUR=9;BYMINUTE=0")
+        XCTAssertEqual(task.prompt, "第一行\n第二行")
+        XCTAssertEqual(task.isEnabled, false)
+        XCTAssertEqual(try XCTUnwrap(task.createdAt).timeIntervalSince1970, 1_777_024_664.433, accuracy: 0.001)
+        XCTAssertEqual(try XCTUnwrap(task.updatedAt).timeIntervalSince1970, 1_777_025_079.767, accuracy: 0.001)
+    }
+
+    func testParsesLocalAutomationTomlDump() throws {
+        let dump = #"""
+        __CODEX_MOBILE_AUTOMATION_BEGIN__ /Users/mac/.codex/automations/example/automation.toml
+        id = "example"
+        name = "Example Automation"
+        status = "ACTIVE"
+        prompt = "run it"
+        __CODEX_MOBILE_AUTOMATION_END__
+        """#
+
+        let task = try XCTUnwrap(CodexAutomationTaskSummary.parseAutomationTOMLDump(dump).first)
+        XCTAssertEqual(task.id, "example")
+        XCTAssertEqual(task.title, "Example Automation")
+        XCTAssertEqual(task.status, "ACTIVE")
+        XCTAssertEqual(task.prompt, "run it")
+        XCTAssertEqual(task.isEnabled, true)
+    }
+
+    func testBuildsCommandExecV2Params() throws {
+        let request = CodexCommandExecRequest(
+            command: "/bin/sh",
+            args: ["-lc", "echo hi"],
+            cols: 80,
+            rows: 24,
+            timeoutSeconds: 1.5
+        )
+        let object = try XCTUnwrap(request.jsonValue.objectValue)
+
+        XCTAssertEqual(object["command"], .array(["/bin/sh", "-lc", "echo hi"]))
+        XCTAssertNil(object["args"])
+        XCTAssertEqual(object["timeoutMs"]?.numberValue, 1_500)
+        XCTAssertEqual(object["size"]?.objectValue?["cols"]?.numberValue, 80)
+        XCTAssertEqual(object["size"]?.objectValue?["rows"]?.numberValue, 24)
+    }
+
     func testParsesAccountRateLimitUsageQuota() throws {
         let value: JSONValue = [
             "rateLimits": [
