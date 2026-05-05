@@ -244,6 +244,175 @@ public struct CodexTokenUsage: Equatable, Sendable {
     }
 }
 
+public struct CodexUsageQuota: Equatable, Sendable {
+    public var usedFraction: Double?
+    public var remainingFraction: Double?
+    public var limitID: String?
+    public var limitName: String?
+    public var planType: String?
+    public var resetsAt: Date?
+    public var windowDurationMinutes: Int?
+    public var creditBalance: String?
+    public var isUnlimited: Bool
+    public var raw: JSONValue
+
+    public init(
+        usedFraction: Double? = nil,
+        remainingFraction: Double? = nil,
+        limitID: String? = nil,
+        limitName: String? = nil,
+        planType: String? = nil,
+        resetsAt: Date? = nil,
+        windowDurationMinutes: Int? = nil,
+        creditBalance: String? = nil,
+        isUnlimited: Bool = false,
+        raw: JSONValue = .object([:])
+    ) {
+        self.usedFraction = usedFraction
+        self.remainingFraction = remainingFraction
+        self.limitID = limitID
+        self.limitName = limitName
+        self.planType = planType
+        self.resetsAt = resetsAt
+        self.windowDurationMinutes = windowDurationMinutes
+        self.creditBalance = creditBalance
+        self.isUnlimited = isUnlimited
+        self.raw = raw
+    }
+
+    public var resolvedUsedFraction: Double? {
+        if let usedFraction {
+            return Self.clampedFraction(usedFraction)
+        }
+        if let remainingFraction {
+            return Self.clampedFraction(1 - remainingFraction)
+        }
+        return isUnlimited ? 0 : nil
+    }
+
+    public var resolvedRemainingFraction: Double? {
+        if let remainingFraction {
+            return Self.clampedFraction(remainingFraction)
+        }
+        if let usedFraction {
+            return Self.clampedFraction(1 - usedFraction)
+        }
+        return isUnlimited ? 1 : nil
+    }
+
+    public static func parse(_ value: JSONValue) -> CodexUsageQuota? {
+        if let snapshot = preferredRateLimitSnapshot(in: value),
+           let quota = parseSnapshot(snapshot, raw: value)
+        {
+            return quota
+        }
+        if let quota = parseSnapshot(value, raw: value) {
+            return quota
+        }
+        switch value {
+        case let .object(object):
+            let wrapperKeys = [
+                "usageQuota", "usage_quota", "quota", "usage",
+                "rateLimits", "rate_limits", "rateLimit", "rate_limit",
+                "limits", "accountUsage", "account_usage", "billing",
+                "subscription", "data",
+            ]
+            for key in wrapperKeys {
+                if let nested = object[key], let quota = parse(nested) {
+                    return quota
+                }
+            }
+        case let .array(values):
+            for value in values {
+                if let quota = parse(value) {
+                    return quota
+                }
+            }
+        case .null, .bool, .number, .string:
+            break
+        }
+        return nil
+    }
+
+    private static func preferredRateLimitSnapshot(in value: JSONValue) -> JSONValue? {
+        guard let object = value.objectValue else { return nil }
+        if let snapshots = object["rateLimitsByLimitId"]?.objectValue ?? object["rate_limits_by_limit_id"]?.objectValue {
+            if let codex = snapshots["codex"] {
+                return codex
+            }
+            if let preferred = snapshots.values.first(where: { snapshot in
+                let object = snapshot.objectValue
+                return object?["limitId"]?.stringValue == "codex" ||
+                    object?["limit_id"]?.stringValue == "codex"
+            }) {
+                return preferred
+            }
+            return snapshots.values.first
+        }
+        return object["rateLimits"] ?? object["rate_limits"]
+    }
+
+    private static func parseSnapshot(_ value: JSONValue, raw: JSONValue) -> CodexUsageQuota? {
+        guard let object = value.objectValue else { return nil }
+        let window = firstObject(
+            in: object,
+            keys: ["primary", "current", "window", "usageWindow", "usage_window", "secondary"]
+        ) ?? object
+        let usedFraction = normalizedFraction(CodexFeatureParsing.double(window, keys: [
+            "usedPercent", "used_percent", "percentUsed", "percent_used",
+            "usedPct", "used_pct", "usedFraction", "used_fraction",
+        ]))
+        let remainingFraction = normalizedFraction(CodexFeatureParsing.double(window, keys: [
+            "remainingPercent", "remaining_percent", "percentRemaining", "percent_remaining",
+            "remainingPct", "remaining_pct", "remainingFraction", "remaining_fraction",
+        ]))
+        let credits = object["credits"]?.objectValue
+        let isUnlimited = CodexFeatureParsing.bool(credits ?? [:], keys: ["unlimited"]) ??
+            CodexFeatureParsing.bool(object, keys: ["unlimited"]) ??
+            false
+        let creditBalance = CodexFeatureParsing.string(credits ?? [:], keys: ["balance"])
+        let hasSignal = usedFraction != nil ||
+            remainingFraction != nil ||
+            isUnlimited ||
+            creditBalance != nil
+        guard hasSignal else { return nil }
+
+        return CodexUsageQuota(
+            usedFraction: usedFraction,
+            remainingFraction: remainingFraction,
+            limitID: CodexFeatureParsing.string(object, keys: ["limitId", "limit_id", "id"]),
+            limitName: CodexFeatureParsing.string(object, keys: ["limitName", "limit_name", "name", "title"]),
+            planType: CodexFeatureParsing.string(object, keys: ["planType", "plan_type", "planName", "plan_name", "plan"]),
+            resetsAt: CodexFeatureParsing.date(window, keys: ["resetsAt", "resets_at", "resetAt", "reset_at"]),
+            windowDurationMinutes: CodexFeatureParsing.int(window, keys: [
+                "windowDurationMins", "window_duration_mins",
+                "windowDurationMinutes", "window_duration_minutes",
+            ]),
+            creditBalance: creditBalance,
+            isUnlimited: isUnlimited,
+            raw: raw
+        )
+    }
+
+    private static func firstObject(in object: [String: JSONValue], keys: [String]) -> [String: JSONValue]? {
+        for key in keys {
+            if let nested = object[key]?.objectValue {
+                return nested
+            }
+        }
+        return nil
+    }
+
+    private static func normalizedFraction(_ value: Double?) -> Double? {
+        guard let value else { return nil }
+        return clampedFraction(value > 1 ? value / 100 : value)
+    }
+
+    private static func clampedFraction(_ value: Double) -> Double {
+        min(1, max(0, value))
+    }
+}
+
 public struct CodexAutomationTaskSummary: Identifiable, Equatable, Sendable {
     public var id: String
     public var title: String

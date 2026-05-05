@@ -149,6 +149,59 @@ final class AppServerFeatureModelsTests: XCTestCase {
         XCTAssertNotNil(task.nextRunAt)
     }
 
+    func testParsesAccountRateLimitUsageQuota() throws {
+        let value: JSONValue = [
+            "rateLimits": [
+                "limitId": "codex",
+                "limitName": "Codex",
+                "planType": "pro",
+                "primary": [
+                    "usedPercent": 37,
+                    "resetsAt": 1_776_000_000,
+                    "windowDurationMins": 300,
+                ],
+            ],
+        ]
+
+        let quota = try XCTUnwrap(CodexUsageQuota.parse(value))
+        XCTAssertEqual(quota.limitID, "codex")
+        XCTAssertEqual(quota.limitName, "Codex")
+        XCTAssertEqual(quota.planType, "pro")
+        XCTAssertEqual(quota.resolvedUsedFraction, 0.37)
+        XCTAssertEqual(quota.resolvedRemainingFraction, 0.63)
+        XCTAssertEqual(quota.windowDurationMinutes, 300)
+        XCTAssertNotNil(quota.resetsAt)
+    }
+
+    func testPrefersCodexRateLimitBucket() throws {
+        let value: JSONValue = [
+            "rateLimits": [
+                "limitId": "default",
+                "primary": [
+                    "usedPercent": 10,
+                ],
+            ],
+            "rateLimitsByLimitId": [
+                "other": [
+                    "limitId": "other",
+                    "primary": [
+                        "usedPercent": 20,
+                    ],
+                ],
+                "codex": [
+                    "limitId": "codex",
+                    "primary": [
+                        "usedPercent": 55,
+                    ],
+                ],
+            ],
+        ]
+
+        let quota = try XCTUnwrap(CodexUsageQuota.parse(value))
+        XCTAssertEqual(quota.limitID, "codex")
+        XCTAssertEqual(quota.resolvedUsedFraction, 0.55)
+    }
+
     func testTokenUsageRejectsObjectsWithoutUsageFields() throws {
         XCTAssertNil(CodexTokenUsage.parse([
             "id": "thread-1",

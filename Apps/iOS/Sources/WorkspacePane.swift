@@ -11,6 +11,7 @@ enum WorkspacePane: String, CaseIterable, Identifiable {
 
     static let sidebarPanes: [WorkspacePane] = [.automations]
     static let headerToolPanes: [WorkspacePane] = [.terminal, .files, .context]
+    static let sheetPanes: [WorkspacePane] = [.automations, .terminal, .files, .context]
 
     var title: String {
         switch self {

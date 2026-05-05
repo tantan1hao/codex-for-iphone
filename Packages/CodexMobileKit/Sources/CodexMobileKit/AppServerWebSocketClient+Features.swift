@@ -23,6 +23,15 @@ public extension AppServerWebSocketClient {
     }
 
     @discardableResult
+    func getUsageQuota() async throws -> CodexUsageQuota {
+        let response = try await sendFeatureRequest(methods: Self.usageQuotaMethods)
+        guard let quota = CodexUsageQuota.parse(response) else {
+            throw AppServerClientError.malformedMessage
+        }
+        return quota
+    }
+
+    @discardableResult
     func readDirectory(path: String, includeHidden: Bool = false) async throws -> [CodexRemoteFileEntry] {
         let response = try await sendRequest(
             method: "fs/readDirectory",
@@ -172,6 +181,17 @@ private extension AppServerWebSocketClient {
         "automation/get",
         "automation/tasks/get",
         "automations/tasks/get",
+    ]
+
+    static let usageQuotaMethods = [
+        "account/rateLimits/read",
+        "account/rateLimits/get",
+        "account/usage",
+        "account/quota",
+        "usage/quota",
+        "quota/usage",
+        "billing/usage",
+        "billing/quota",
     ]
 
     func sendFeatureRequest(methods: [String], params: JSONValue? = nil) async throws -> JSONValue {

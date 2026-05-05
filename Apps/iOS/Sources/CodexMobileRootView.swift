@@ -142,15 +142,7 @@ struct WorkspacePaneContentView: View {
         case .chat:
             ChatPaneContentView()
         case .automations:
-            WorkspacePaneFeatureContainer(pane: .automations) {
-                AutomationsFeatureView(
-                    state: store.automationsState,
-                    onRefresh: { await store.refreshAutomations() }
-                )
-                .task {
-                    await store.refreshAutomations()
-                }
-            }
+            ChatPaneContentView()
         case .terminal:
             WorkspacePaneFeatureContainer(pane: .terminal) {
                 TerminalFeatureView(actions: store.terminalFeatureActions)
@@ -540,6 +532,14 @@ private struct WorkspaceToolSheet: View {
     @ViewBuilder
     private var toolContent: some View {
         switch pane {
+        case .automations:
+            AutomationsFeatureView(
+                state: store.automationsState,
+                onRefresh: { await store.refreshAutomations() }
+            )
+            .task {
+                await store.refreshAutomations()
+            }
         case .terminal:
             TerminalFeatureView(actions: store.terminalFeatureActions)
         case .files:
@@ -553,7 +553,7 @@ private struct WorkspaceToolSheet: View {
             .task {
                 await store.refreshContextUsage()
             }
-        case .chat, .automations:
+        case .chat:
             WorkspacePanePlaceholder(pane: pane)
         }
     }
@@ -669,12 +669,11 @@ struct CodexSidebar: View {
                 .padding(.horizontal, 12)
             ForEach(WorkspacePane.sidebarPanes) { pane in
                 Button {
-                    store.activatePane(pane)
-                    store.isSidebarPresented = false
+                    store.presentToolPane(pane)
                 } label: {
                     SidebarPaneRow(
                         pane: pane,
-                        isSelected: store.activePane == pane
+                        isSelected: store.presentedToolPane == pane
                     )
                 }
                 .buttonStyle(.plain)
@@ -775,108 +774,97 @@ private struct SidebarQuotaCard: View {
     @EnvironmentObject private var store: CodexMobileStore
 
     var body: some View {
-        Button {
-            store.activatePane(.context)
-            Task {
-                await store.refreshContextUsage()
-            }
-        } label: {
-            HStack(spacing: 12) {
-                ContextRemainingRing(
-                    remainingFraction: remainingFraction,
-                    isSelected: store.activePane == .context,
-                    progressTint: primaryTint
-                )
+        HStack(spacing: 12) {
+            UsageQuotaRing(usedFraction: usedFraction, tint: primaryTint)
                 .frame(width: 28, height: 28)
 
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 6) {
-                        Text("额度")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(CodexTheme.tertiaryText)
-                        Spacer(minLength: 0)
-                        Image(systemName: "chevron.right")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(CodexTheme.tertiaryText)
-                    }
-                    Text(primaryText)
-                        .font(.callout.weight(.semibold))
-                        .foregroundStyle(primaryTint)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.82)
-                    Text(detailText)
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(CodexTheme.secondaryText)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.82)
-                }
+            VStack(alignment: .leading, spacing: 3) {
+                Text("使用额度")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(CodexTheme.tertiaryText)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Text(primaryText)
+                    .font(.callout.weight(.semibold))
+                    .foregroundStyle(primaryTint)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.82)
+                Text(detailText)
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(CodexTheme.secondaryText)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.82)
             }
-            .padding(12)
-            .background(CodexTheme.panelRaised, in: RoundedRectangle(cornerRadius: 8))
-            .overlay {
-                RoundedRectangle(cornerRadius: 8)
-                    .stroke(CodexTheme.separator, lineWidth: 1)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .buttonStyle(.plain)
+        .padding(12)
+        .background(CodexTheme.panelRaised, in: RoundedRectangle(cornerRadius: 8))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(CodexTheme.separator, lineWidth: 1)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .task {
-            await store.refreshContextUsage()
+            await store.refreshUsageQuota()
         }
-        .accessibilityLabel("额度")
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("使用额度")
         .accessibilityValue("\(primaryText)，\(detailText)")
     }
 
-    private var remainingFraction: Double? {
-        guard case let .loaded(snapshot) = store.contextUsageState else { return nil }
-        return snapshot.resolvedRemainingFraction
+    private var usedFraction: Double? {
+        guard case let .loaded(quota, _) = store.usageQuotaState else { return nil }
+        return quota.resolvedUsedFraction
     }
 
     private var primaryText: String {
-        switch store.contextUsageState {
-        case .loaded(let snapshot):
-            if let fraction = snapshot.resolvedRemainingFraction {
-                return "剩余 \(percentText(fraction))"
+        switch store.usageQuotaState {
+        case .loaded(let quota, _):
+            if quota.isUnlimited {
+                return "无限额度"
             }
-            return "等待用量"
+            if let fraction = quota.resolvedUsedFraction {
+                return "已用 \(percentText(fraction))"
+            }
+            return "额度可用"
         case .loading:
             return "加载中"
         case .unsupported:
-            return "等待用量"
+            return "暂不可用"
         case .error:
             return "读取失败"
         }
     }
 
     private var detailText: String {
-        switch store.contextUsageState {
-        case .loaded(let snapshot):
-            if let remainingTokens = snapshot.remainingTokens,
-               let contextWindow = snapshot.contextWindow
-            {
-                return "\(abbreviatedTokens(remainingTokens)) / \(abbreviatedTokens(contextWindow)) tokens"
+        switch store.usageQuotaState {
+        case .loaded(let quota, let lastUpdated):
+            if let resetsAt = quota.resetsAt {
+                return "重置 \(resetsAt.formatted(date: .omitted, time: .shortened))"
             }
-            if let tokensInContext = snapshot.tokensInContext,
-               let contextWindow = snapshot.contextWindow
-            {
-                return "\(abbreviatedTokens(tokensInContext)) / \(abbreviatedTokens(contextWindow)) 已用"
+            if let minutes = quota.windowDurationMinutes {
+                return "\(windowDurationText(minutes)) 窗口"
             }
-            return "上下文窗口"
+            if let limitName = quota.limitName, !limitName.isEmpty {
+                return limitName
+            }
+            if let planType = quota.planType, !planType.isEmpty {
+                return planType
+            }
+            return lastUpdated.map { "更新 \($0)" } ?? "使用额度"
         case .loading:
             return "正在更新"
-        case .unsupported:
-            return store.isConnected ? "发送后更新" : "未连接"
-        case .error:
-            return "点按查看详情"
+        case .unsupported(let message):
+            return store.isConnected ? shortenedUnsupportedMessage(message) : "未连接"
+        case .error(_, let lastUpdated):
+            return lastUpdated.map { "失败 \($0)" } ?? "读取失败"
         }
     }
 
     private var primaryTint: Color {
-        guard let remainingFraction else { return CodexTheme.text }
-        if remainingFraction < 0.15 {
+        guard let usedFraction else { return CodexTheme.text }
+        if usedFraction >= 0.9 {
             return CodexTheme.orange
         }
-        if remainingFraction < 0.35 {
+        if usedFraction >= 0.7 {
             return CodexTheme.blue
         }
         return CodexTheme.text
@@ -887,15 +875,46 @@ private struct SidebarQuotaCard: View {
         return "\(Int((clampedFraction * 100).rounded()))%"
     }
 
-    private func abbreviatedTokens(_ value: Int) -> String {
-        let absoluteValue = abs(value)
-        if absoluteValue >= 1_000_000 {
-            return String(format: "%.1fM", Double(value) / 1_000_000)
+    private func windowDurationText(_ minutes: Int) -> String {
+        if minutes >= 24 * 60, minutes % (24 * 60) == 0 {
+            return "\(minutes / (24 * 60))天"
         }
-        if absoluteValue >= 1_000 {
-            return "\(Int((Double(value) / 1_000).rounded()))K"
+        if minutes >= 60, minutes % 60 == 0 {
+            return "\(minutes / 60)小时"
         }
-        return value.formatted(.number)
+        return "\(minutes)分钟"
+    }
+
+    private func shortenedUnsupportedMessage(_ message: String) -> String {
+        if message.localizedCaseInsensitiveContains("接口") ||
+            message.localizedCaseInsensitiveContains("method")
+        {
+            return "接口暂不可用"
+        }
+        return message
+    }
+}
+
+private struct UsageQuotaRing: View {
+    var usedFraction: Double?
+    var tint: Color
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .stroke(CodexTheme.secondaryText.opacity(0.22), lineWidth: 3)
+            if let usedFraction {
+                let displayFraction = min(max(usedFraction, 0), 1)
+                Circle()
+                    .trim(from: 0, to: displayFraction)
+                    .stroke(
+                        tint,
+                        style: StrokeStyle(lineWidth: 3, lineCap: .round)
+                    )
+                    .rotationEffect(.degrees(-90))
+                    .animation(.snappy(duration: 0.24), value: displayFraction)
+            }
+        }
     }
 }
 
@@ -1103,11 +1122,11 @@ struct CompactThreadListView: View {
                 .padding(.horizontal, 12)
             ForEach(WorkspacePane.sidebarPanes) { pane in
                 Button {
-                    store.activatePane(pane)
+                    store.presentToolPane(pane)
                 } label: {
                     SidebarPaneRow(
                         pane: pane,
-                        isSelected: store.activePane == pane
+                        isSelected: store.presentedToolPane == pane
                     )
                 }
                 .buttonStyle(.plain)

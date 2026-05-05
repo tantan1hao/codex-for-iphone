@@ -103,6 +103,13 @@ struct HistoryContentNotice: Equatable {
     )
 }
 
+enum UsageQuotaContentState: Equatable {
+    case unsupported(message: String = "当前 Codex 连接尚未提供使用额度接口。")
+    case loading
+    case error(message: String, lastUpdated: String? = nil)
+    case loaded(CodexUsageQuota, lastUpdated: String? = nil)
+}
+
 @MainActor
 final class CodexMobileStore: ObservableObject {
     @Published var connectionState: MobileConnectionState = .unpaired
@@ -154,6 +161,7 @@ final class CodexMobileStore: ObservableObject {
     @Published private(set) var collaborationModes: [CodexCollaborationMode] = []
     @Published private(set) var automationsState: AutomationsFeatureView.ContentState = .unsupported()
     @Published private(set) var contextUsageState: ContextUsageFeatureView.ContentState = .unsupported()
+    @Published private(set) var usageQuotaState: UsageQuotaContentState = .unsupported()
 
     private static let historyContentPreferenceKey = "CodexMobile.shouldLoadHistoryContent"
     private static let themePreferenceKey = "CodexMobile.themePreference"
@@ -304,7 +312,7 @@ final class CodexMobileStore: ObservableObject {
     }
 
     func presentToolPane(_ pane: WorkspacePane) {
-        guard WorkspacePane.headerToolPanes.contains(pane) else { return }
+        guard WorkspacePane.sheetPanes.contains(pane) else { return }
         presentedToolPane = pane
         isSidebarPresented = false
     }
@@ -366,6 +374,7 @@ final class CodexMobileStore: ObservableObject {
         isPlanModeEnabled = false
         automationsState = .unsupported()
         contextUsageState = .unsupported()
+        usageQuotaState = .unsupported()
         latestTokenUsage = nil
         contextCompactStatus = .unavailable("等待 Codex 返回上下文用量。")
         terminalActiveProcessID = nil
@@ -424,6 +433,7 @@ final class CodexMobileStore: ObservableObject {
         isInterruptingTurn = false
         isPlanModeEnabled = false
         automationsState = .unsupported(message: "已断开连接。")
+        usageQuotaState = .unsupported(message: "已断开连接。")
         latestTokenUsage = nil
         contextCompactStatus = .unavailable("已断开连接。")
         updateContextUsageState()
@@ -457,6 +467,7 @@ final class CodexMobileStore: ObservableObject {
         isInterruptingTurn = false
         isPlanModeEnabled = false
         automationsState = .unsupported()
+        usageQuotaState = .unsupported()
         latestTokenUsage = nil
         contextCompactStatus = .unavailable("等待 Codex 返回上下文用量。")
         updateContextUsageState()
@@ -1361,6 +1372,20 @@ extension CodexMobileStore: TerminalFeatureActionProviding, WorkspaceFileDataSou
         updateContextUsageState()
     }
 
+    func refreshUsageQuota() async {
+        guard isConnected else {
+            usageQuotaState = .unsupported(message: "请先连接 Codex app-server。")
+            return
+        }
+        usageQuotaState = .loading
+        do {
+            let quota = try await client.getUsageQuota()
+            usageQuotaState = .loaded(quota, lastUpdated: formattedNow())
+        } catch {
+            usageQuotaState = usageQuotaUnsupportedOrErrorState(error)
+        }
+    }
+
     func requestContextCompact() async {
         guard isConnected, let threadID = selectedThread?.id else {
             contextCompactStatus = .unavailable("请先选择一个已连接的会话。")
@@ -1469,6 +1494,8 @@ extension CodexMobileStore: TerminalFeatureActionProviding, WorkspaceFileDataSou
             switch method {
             case "thread/tokenUsage/updated":
                 break
+            case "account/rateLimits/updated":
+                updateUsageQuotaState(from: params)
             case "thread/compacted":
                 contextCompactStatus = .compacted(message: "当前会话上下文已压缩。")
                 updateContextUsageState()
@@ -1526,6 +1553,13 @@ extension CodexMobileStore: TerminalFeatureActionProviding, WorkspaceFileDataSou
         updateContextUsageState()
     }
 
+    private func updateUsageQuotaState(from value: JSONValue?) {
+        guard let value,
+              let quota = CodexUsageQuota.parse(value)
+        else { return }
+        usageQuotaState = .loaded(quota, lastUpdated: formattedNow())
+    }
+
     private func compactStatus(for usage: CodexTokenUsage) -> ContextUsageFeatureView.CompactStatus {
         guard let percentRemaining = usage.percentRemaining else {
             return .available
@@ -1552,6 +1586,18 @@ extension CodexMobileStore: TerminalFeatureActionProviding, WorkspaceFileDataSou
             message.localizedCaseInsensitiveContains("unsupported")
         {
             return .unsupported(message: "当前 Codex app-server 不支持自动化列表接口。")
+        }
+        return .error(message: message, lastUpdated: formattedNow())
+    }
+
+    private func usageQuotaUnsupportedOrErrorState(_ error: Error) -> UsageQuotaContentState {
+        let message = error.localizedDescription
+        if message.localizedCaseInsensitiveContains("method") ||
+            message.localizedCaseInsensitiveContains("not found") ||
+            message.localizedCaseInsensitiveContains("unknown") ||
+            message.localizedCaseInsensitiveContains("unsupported")
+        {
+            return .unsupported(message: "当前 Codex app-server 不支持使用额度接口。")
         }
         return .error(message: message, lastUpdated: formattedNow())
     }
