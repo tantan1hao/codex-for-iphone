@@ -311,27 +311,15 @@ final class CodexMobileStore: ObservableObject {
         connectionState = .connecting
         pairing = payload
         pairingText = payload.deepLinkURL.absoluteString
-        activePane = .chat
-        presentedToolPane = nil
         threads = []
         selectedThread = nil
         conversation = ConversationState()
         composerText = ""
-        isSendingComposer = false
-        isInterruptingTurn = false
-        isPlanModeEnabled = false
+        resetSessionState()
         automationsState = .unsupported()
         contextUsageState = .unsupported()
         latestTokenUsage = nil
         contextCompactStatus = .unavailable("等待 Codex 返回上下文用量。")
-        terminalActiveProcessID = nil
-        terminalOutputContinuation = nil
-        answeringApprovalID = nil
-        answeringApprovalDecisionID = nil
-        isLoadingHistoryContent = false
-        isLoadingMoreHistory = false
-        historyNextCursor = nil
-        historyContentNotice = nil
         if persist {
             try? credentialStore.save(payload)
         }
@@ -376,25 +364,12 @@ final class CodexMobileStore: ObservableObject {
         invalidateCurrentConnection(emitDisconnectEvent: true)
         selectedThread = nil
         conversation = ConversationState()
-        activePane = .chat
-        isSendingComposer = false
-        isInterruptingTurn = false
-        isPlanModeEnabled = false
+        resetSessionState()
         automationsState = .unsupported(message: "已断开连接。")
         latestTokenUsage = nil
         contextCompactStatus = .unavailable("已断开连接。")
         updateContextUsageState()
-        terminalActiveProcessID = nil
-        terminalOutputContinuation = nil
-        answeringApprovalID = nil
-        answeringApprovalDecisionID = nil
         isSettingsPresented = false
-        presentedToolPane = nil
-        isSidebarPresented = false
-        isLoadingHistoryContent = false
-        isLoadingMoreHistory = false
-        historyNextCursor = nil
-        historyContentNotice = nil
         connectionState = pairing == nil ? .unpaired : .disconnected("已手动断开。")
     }
 
@@ -403,25 +378,13 @@ final class CodexMobileStore: ObservableObject {
         try? credentialStore.delete()
         pairing = nil
         pairingText = ""
-        activePane = .chat
-        presentedToolPane = nil
         threads = []
         selectedThread = nil
         conversation = ConversationState()
-        isLoadingHistoryContent = false
-        isLoadingMoreHistory = false
-        isInterruptingTurn = false
-        isPlanModeEnabled = false
         automationsState = .unsupported()
         latestTokenUsage = nil
         contextCompactStatus = .unavailable("等待 Codex 返回上下文用量。")
         updateContextUsageState()
-        terminalActiveProcessID = nil
-        terminalOutputContinuation = nil
-        answeringApprovalID = nil
-        answeringApprovalDecisionID = nil
-        historyNextCursor = nil
-        historyContentNotice = nil
         connectionState = .unpaired
     }
 
@@ -432,32 +395,40 @@ final class CodexMobileStore: ObservableObject {
         connectionState = .preview
         pairingText = preview.pairingText
         pairing = preview.pairing
-        activePane = .chat
         threads = preview.threads
         selectedThread = preview.selectedThread
         conversation = preview.conversation
         composerText = preview.composerText
-        isSendingComposer = false
-        isInterruptingTurn = false
-        isPlanModeEnabled = false
+        resetSessionState()
         automationsState = .loaded(automations: [], lastUpdated: formattedNow())
         latestTokenUsage = CodexTokenUsage(totalTokens: 62_400, tokenLimit: 200_000, raw: .object([:]))
         contextCompactStatus = .available
         updateContextUsageState()
+        isScannerPresented = false
+        isSettingsPresented = false
+        availableModels = preview.availableModels
+        selectedModelID = preview.selectedModelID
+        selectedReasoningEffort = preview.selectedReasoningEffort
+        selectedPermissionPreset = preview.selectedPermissionPreset
+    }
+
+    /// Resets all transient per-session UI and feature state to defaults.
+    /// Called from connect(), disconnect(), forgetPairing(), and loadDesignPreview().
+    private func resetSessionState() {
+        activePane = .chat
+        presentedToolPane = nil
+        isSidebarPresented = false
+        isSendingComposer = false
+        isInterruptingTurn = false
+        isPlanModeEnabled = false
         answeringApprovalID = nil
         answeringApprovalDecisionID = nil
         isLoadingHistoryContent = false
         isLoadingMoreHistory = false
         historyNextCursor = nil
         historyContentNotice = nil
-        isScannerPresented = false
-        isSidebarPresented = false
-        isSettingsPresented = false
-        presentedToolPane = nil
-        availableModels = preview.availableModels
-        selectedModelID = preview.selectedModelID
-        selectedReasoningEffort = preview.selectedReasoningEffort
-        selectedPermissionPreset = preview.selectedPermissionPreset
+        terminalActiveProcessID = nil
+        terminalOutputContinuation = nil
     }
 
     func loadThreads() async throws {
@@ -866,9 +837,6 @@ final class CodexMobileStore: ObservableObject {
                     if (isLoadingHistoryContent || isLoadingMoreHistory),
                        isMessageTooLongMessage(message)
                     {
-                        continue
-                    }
-                    if isMessageTooLongMessage(message) {
                         continue
                     }
                     connectionState = classifyConnectionError(AppServerClientError.transport(message))

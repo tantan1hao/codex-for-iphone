@@ -246,30 +246,8 @@ public final class AppServerWebSocketClient {
         )
     }
 
-    @discardableResult
-    public func startTurn(threadID: String, text: String, cwd: String, settings: CodexSessionSettings) async throws -> JSONValue {
-        var params: [String: JSONValue] = [
-            "threadId": .string(threadID),
-            "cwd": .string(cwd),
-            "input": [
-                [
-                    "type": "text",
-                    "text": .string(text),
-                    "text_elements": [],
-                ],
-            ],
-            "approvalsReviewer": "user",
-            "approvalPolicy": settings.permissionPreset.approvalPolicy,
-            "sandboxPolicy": settings.permissionPreset.turnSandboxPolicy(cwd: cwd),
-        ]
-        if let model = settings.model {
-            params["model"] = .string(model)
-        }
-        if let reasoningEffort = settings.reasoningEffort {
-            params["effort"] = .string(reasoningEffort)
-        }
-        return try await sendRequest(method: "turn/start", params: .object(params))
-    }
+    // startTurn is defined in AppServerWebSocketClient+Features.swift
+    // with the full parameter set including collaborationMode.
 
     @discardableResult
     public func interruptTurn(threadID: String, turnID: String? = nil) async throws -> JSONValue {
@@ -327,15 +305,23 @@ public final class AppServerWebSocketClient {
         guard task != nil else { throw AppServerClientError.notConnected }
         let id = JSONRPCID.int(nextRequestID)
         nextRequestID += 1
-        return try await withCheckedThrowingContinuation { continuation in
-            pendingRequests[id] = continuation
-            Task { @MainActor in
-                do {
-                    try await self.send(message: .request(id: id, method: method, params: params))
-                } catch {
-                    if let pending = self.pendingRequests.removeValue(forKey: id) {
-                        pending.resume(throwing: error)
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                pendingRequests[id] = continuation
+                Task { @MainActor in
+                    do {
+                        try await self.send(message: .request(id: id, method: method, params: params))
+                    } catch {
+                        if let pending = self.pendingRequests.removeValue(forKey: id) {
+                            pending.resume(throwing: error)
+                        }
                     }
+                }
+            }
+        } onCancel: { [weak self] in
+            Task { @MainActor [weak self] in
+                if let pending = self?.pendingRequests.removeValue(forKey: id) {
+                    pending.resume(throwing: CancellationError())
                 }
             }
         }

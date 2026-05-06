@@ -1,4 +1,4 @@
-import AVFoundation
+@preconcurrency import AVFoundation
 import SwiftUI
 
 struct QRScannerSheet: View {
@@ -67,7 +67,9 @@ final class ScannerViewController: UIViewController, AVCaptureMetadataOutputObje
         layer.videoGravity = .resizeAspectFill
         view.layer.addSublayer(layer)
         previewLayer = layer
-        session.startRunning()
+        DispatchQueue.global(qos: .userInitiated).async { [session] in
+            session.startRunning()
+        }
     }
 
     nonisolated func metadataOutput(
