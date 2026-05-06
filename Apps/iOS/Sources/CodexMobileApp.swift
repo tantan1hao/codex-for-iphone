@@ -1,6 +1,7 @@
 import CodexMobileKit
 import Foundation
 import SwiftUI
+import UIKit
 
 @main
 struct CodexMobileApp: App {
@@ -17,13 +18,32 @@ struct CodexMobileApp: App {
                 .task {
                     await store.restoreAndConnectIfNeeded()
                 }
+                .onAppear { applyThemeOverride(store.themePreference) }
+                .onChange(of: store.themePreference) { _, newValue in
+                    applyThemeOverride(newValue)
+                }
+        }
+    }
+}
+
+@MainActor
+private func applyThemeOverride(_ preference: ThemePreference) {
+    let style: UIUserInterfaceStyle
+    switch preference {
+    case .system: style = .unspecified
+    case .light: style = .light
+    case .dark: style = .dark
+    }
+    for scene in UIApplication.shared.connectedScenes {
+        guard let windowScene = scene as? UIWindowScene else { continue }
+        for window in windowScene.windows {
+            window.overrideUserInterfaceStyle = style
         }
     }
 }
 
 enum MobileConnectionState: Equatable {
     case unpaired
-    case preview
     case connecting
     case connected
     case codexUnavailable(String)
@@ -34,7 +54,6 @@ enum MobileConnectionState: Equatable {
     var title: String {
         switch self {
         case .unpaired: "未配对"
-        case .preview: "界面预览"
         case .connecting: "连接中"
         case .connected: "已连接"
         case .codexUnavailable: "Codex 未启动"
@@ -47,7 +66,6 @@ enum MobileConnectionState: Equatable {
     var detail: String {
         switch self {
         case .unpaired: "扫描 Helper 二维码，或粘贴配对链接。"
-        case .preview: "当前是本地 UI 预览，不会连接电脑 Codex，也不会返回真实结果。"
         case .connecting: "正在打开 Codex 连接。"
         case .connected: "可以开始或继续一个 Codex 会话。"
         case let .codexUnavailable(message): message
@@ -60,7 +78,6 @@ enum MobileConnectionState: Equatable {
     var tint: Color {
         switch self {
         case .connected: .green
-        case .preview: .orange
         case .running, .connecting: .blue
         case .unpaired: .secondary
         case .codexUnavailable, .tokenRejected, .disconnected: .red
@@ -84,6 +101,13 @@ struct HistoryContentNotice: Equatable {
         title: "更早历史过大",
         detail: "已停止继续加载旧消息；当前会话可以继续发送和接收新消息。"
     )
+}
+
+enum UsageQuotaContentState: Equatable {
+    case unsupported(message: String = "当前 Codex 连接尚未提供使用额度接口。")
+    case loading
+    case error(message: String, lastUpdated: String? = nil)
+    case loaded(CodexUsageQuota, lastUpdated: String? = nil)
 }
 
 @MainActor
@@ -124,14 +148,24 @@ final class CodexMobileStore: ObservableObject {
     @Published var availableModels: [CodexModelOption] = [.fallback]
     @Published var selectedModelID = CodexModelOption.fallback.model
     @Published var selectedReasoningEffort = "xhigh"
+    @Published var selectedServiceTier = CodexServiceTier(
+        rawValue: UserDefaults.standard.string(forKey: CodexMobileStore.serviceTierPreferenceKey) ?? ""
+    ) ?? .standard {
+        didSet {
+            UserDefaults.standard.set(selectedServiceTier.rawValue, forKey: Self.serviceTierPreferenceKey)
+        }
+    }
     @Published var selectedPermissionPreset: CodexPermissionPreset = .workspaceWrite
     @Published var isPlanModeEnabled = false
+    @Published private(set) var isRestoringSavedPairing = true
     @Published private(set) var collaborationModes: [CodexCollaborationMode] = []
     @Published private(set) var automationsState: AutomationsFeatureView.ContentState = .unsupported()
     @Published private(set) var contextUsageState: ContextUsageFeatureView.ContentState = .unsupported()
+    @Published private(set) var usageQuotaState: UsageQuotaContentState = .unsupported()
 
     private static let historyContentPreferenceKey = "CodexMobile.shouldLoadHistoryContent"
     private static let themePreferenceKey = "CodexMobile.themePreference"
+    private static let serviceTierPreferenceKey = "CodexMobile.serviceTier"
     private static let historyPageLimit = 1
     private static let selectedThreadSyncPageLimit = 3
     private let credentialStore = PairingCredentialStore()
@@ -142,7 +176,6 @@ final class CodexMobileStore: ObservableObject {
     private var syncLoopTask: Task<Void, Never>?
     private var connectionGeneration = 0
     private var didAttemptRestore = false
-    private var isDesignPreviewMode = false
     private var oversizedHistoryThreadIDs = Set<String>()
     private var latestTokenUsage: CodexTokenUsage?
     private var contextCompactStatus: ContextUsageFeatureView.CompactStatus = .unavailable("等待 Codex 返回上下文用量。")
@@ -155,14 +188,12 @@ final class CodexMobileStore: ObservableObject {
 
     var canReconnect: Bool {
         pairing != nil &&
-            !isDesignPreviewMode &&
             connectionState != .connecting &&
             connectionState != .running
     }
 
     var canSendComposer: Bool {
         isConnected &&
-            !isDesignPreviewMode &&
             !conversation.isRunning &&
             !isSendingComposer &&
             !composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -211,6 +242,14 @@ final class CodexMobileStore: ObservableObject {
         return efforts.isEmpty ? ["medium", "high", "xhigh"] : efforts
     }
 
+    var availableServiceTiers: [CodexServiceTier] {
+        serviceTiers(for: selectedModel)
+    }
+
+    var activeServiceTier: CodexServiceTier {
+        availableServiceTiers.contains(selectedServiceTier) ? selectedServiceTier : .standard
+    }
+
     var modelStatusTitle: String {
         "\(shortModelName(selectedModel.displayName)) \(reasoningEffortTitle(selectedReasoningEffort))"
     }
@@ -225,6 +264,14 @@ final class CodexMobileStore: ObservableObject {
 
     var compactPermissionStatusTitle: String {
         selectedPermissionPreset.compactTitle
+    }
+
+    var serviceTierStatusTitle: String {
+        activeServiceTier.displayTitle
+    }
+
+    var compactServiceTierStatusTitle: String {
+        activeServiceTier.compactTitle
     }
 
     var planModeAvailable: Bool {
@@ -255,8 +302,8 @@ final class CodexMobileStore: ObservableObject {
         }
     }
 
-    var isPreviewMode: Bool {
-        isDesignPreviewMode
+    var shouldShowWorkspace: Bool {
+        pairing != nil || isConnected
     }
 
     func activatePane(_ pane: WorkspacePane) {
@@ -265,7 +312,7 @@ final class CodexMobileStore: ObservableObject {
     }
 
     func presentToolPane(_ pane: WorkspacePane) {
-        guard WorkspacePane.headerToolPanes.contains(pane) else { return }
+        guard WorkspacePane.sheetPanes.contains(pane) else { return }
         presentedToolPane = pane
         isSidebarPresented = false
     }
@@ -279,8 +326,12 @@ final class CodexMobileStore: ObservableObject {
     }
 
     func restoreAndConnectIfNeeded() async {
-        guard !didAttemptRestore, pairing == nil else { return }
+        guard !didAttemptRestore, pairing == nil else {
+            isRestoringSavedPairing = false
+            return
+        }
         didAttemptRestore = true
+        defer { isRestoringSavedPairing = false }
         do {
             guard let savedPairing = try credentialStore.load() else { return }
             pairing = savedPairing
@@ -294,6 +345,7 @@ final class CodexMobileStore: ObservableObject {
     }
 
     func connectFromText() async {
+        isRestoringSavedPairing = false
         let payload: PairingPayload
         do {
             payload = try PairingPayload.parse(pairingText)
@@ -307,19 +359,32 @@ final class CodexMobileStore: ObservableObject {
     }
 
     func connect(_ payload: PairingPayload, persist: Bool = true) async throws {
-        isDesignPreviewMode = false
+        isRestoringSavedPairing = false
         connectionState = .connecting
         pairing = payload
         pairingText = payload.deepLinkURL.absoluteString
+        activePane = .chat
+        presentedToolPane = nil
         threads = []
         selectedThread = nil
         conversation = ConversationState()
         composerText = ""
-        resetSessionState()
+        isSendingComposer = false
+        isInterruptingTurn = false
+        isPlanModeEnabled = false
         automationsState = .unsupported()
         contextUsageState = .unsupported()
+        usageQuotaState = .unsupported()
         latestTokenUsage = nil
         contextCompactStatus = .unavailable("等待 Codex 返回上下文用量。")
+        terminalActiveProcessID = nil
+        terminalOutputContinuation = nil
+        answeringApprovalID = nil
+        answeringApprovalDecisionID = nil
+        isLoadingHistoryContent = false
+        isLoadingMoreHistory = false
+        historyNextCursor = nil
+        historyContentNotice = nil
         if persist {
             try? credentialStore.save(payload)
         }
@@ -360,16 +425,29 @@ final class CodexMobileStore: ObservableObject {
     }
 
     func disconnect() {
-        isDesignPreviewMode = false
         invalidateCurrentConnection(emitDisconnectEvent: true)
         selectedThread = nil
         conversation = ConversationState()
-        resetSessionState()
+        activePane = .chat
+        isSendingComposer = false
+        isInterruptingTurn = false
+        isPlanModeEnabled = false
         automationsState = .unsupported(message: "已断开连接。")
+        usageQuotaState = .unsupported(message: "已断开连接。")
         latestTokenUsage = nil
         contextCompactStatus = .unavailable("已断开连接。")
         updateContextUsageState()
+        terminalActiveProcessID = nil
+        terminalOutputContinuation = nil
+        answeringApprovalID = nil
+        answeringApprovalDecisionID = nil
         isSettingsPresented = false
+        presentedToolPane = nil
+        isSidebarPresented = false
+        isLoadingHistoryContent = false
+        isLoadingMoreHistory = false
+        historyNextCursor = nil
+        historyContentNotice = nil
         connectionState = pairing == nil ? .unpaired : .disconnected("已手动断开。")
     }
 
@@ -378,57 +456,28 @@ final class CodexMobileStore: ObservableObject {
         try? credentialStore.delete()
         pairing = nil
         pairingText = ""
+        isRestoringSavedPairing = false
+        activePane = .chat
+        presentedToolPane = nil
         threads = []
         selectedThread = nil
         conversation = ConversationState()
+        isLoadingHistoryContent = false
+        isLoadingMoreHistory = false
+        isInterruptingTurn = false
+        isPlanModeEnabled = false
         automationsState = .unsupported()
+        usageQuotaState = .unsupported()
         latestTokenUsage = nil
         contextCompactStatus = .unavailable("等待 Codex 返回上下文用量。")
         updateContextUsageState()
-        connectionState = .unpaired
-    }
-
-    func loadDesignPreview() {
-        isDesignPreviewMode = true
-        invalidateCurrentConnection(emitDisconnectEvent: true)
-        let preview = CodexMobileStore.preview()
-        connectionState = .preview
-        pairingText = preview.pairingText
-        pairing = preview.pairing
-        threads = preview.threads
-        selectedThread = preview.selectedThread
-        conversation = preview.conversation
-        composerText = preview.composerText
-        resetSessionState()
-        automationsState = .loaded(automations: [], lastUpdated: formattedNow())
-        latestTokenUsage = CodexTokenUsage(totalTokens: 62_400, tokenLimit: 200_000, raw: .object([:]))
-        contextCompactStatus = .available
-        updateContextUsageState()
-        isScannerPresented = false
-        isSettingsPresented = false
-        availableModels = preview.availableModels
-        selectedModelID = preview.selectedModelID
-        selectedReasoningEffort = preview.selectedReasoningEffort
-        selectedPermissionPreset = preview.selectedPermissionPreset
-    }
-
-    /// Resets all transient per-session UI and feature state to defaults.
-    /// Called from connect(), disconnect(), forgetPairing(), and loadDesignPreview().
-    private func resetSessionState() {
-        activePane = .chat
-        presentedToolPane = nil
-        isSidebarPresented = false
-        isSendingComposer = false
-        isInterruptingTurn = false
-        isPlanModeEnabled = false
-        answeringApprovalID = nil
-        answeringApprovalDecisionID = nil
-        isLoadingHistoryContent = false
-        isLoadingMoreHistory = false
-        historyNextCursor = nil
-        historyContentNotice = nil
         terminalActiveProcessID = nil
         terminalOutputContinuation = nil
+        answeringApprovalID = nil
+        answeringApprovalDecisionID = nil
+        historyNextCursor = nil
+        historyContentNotice = nil
+        connectionState = .unpaired
     }
 
     func loadThreads() async throws {
@@ -458,7 +507,7 @@ final class CodexMobileStore: ObservableObject {
     }
 
     func refreshThreads() async {
-        guard isConnected, !isDesignPreviewMode else { return }
+        guard isConnected else { return }
         do {
             try await loadThreads()
         } catch {
@@ -469,21 +518,6 @@ final class CodexMobileStore: ObservableObject {
     func startNewThread() async {
         guard let pairing else { return }
         threadContentRefreshTask?.cancel()
-        if isDesignPreviewMode {
-            let thread = CodexThread(
-                id: "preview-\(UUID().uuidString)",
-                name: "新对话",
-                preview: "新对话",
-                cwd: pairing.cwd,
-                status: "loaded",
-                updatedAt: .now
-            )
-            selectedThread = thread
-            threads.insert(thread, at: 0)
-            conversation = ConversationState(threadID: thread.id)
-            historyContentNotice = nil
-            return
-        }
         do {
             let value = try await client.startThread(cwd: pairing.cwd, settings: currentSessionSettings)
             guard let thread = CodexThread.parseStartOrResumeResponse(value) else { return }
@@ -509,7 +543,7 @@ final class CodexMobileStore: ObservableObject {
         isLoadingHistoryContent = false
         isLoadingMoreHistory = false
         historyContentNotice = nil
-        guard isConnected, !isDesignPreviewMode else { return }
+        guard isConnected else { return }
         if oversizedHistoryThreadIDs.contains(thread.id) {
             historyContentNotice = .oversized
             conversation = ConversationState(threadID: thread.id)
@@ -648,7 +682,7 @@ final class CodexMobileStore: ObservableObject {
     func setShouldLoadHistoryContent(_ enabled: Bool) {
         shouldLoadHistoryContent = enabled
         guard let thread = selectedThread else { return }
-        if enabled, isConnected, !isDesignPreviewMode, conversation.items.isEmpty {
+        if enabled, isConnected, conversation.items.isEmpty {
             Task { await select(thread) }
         } else if !enabled, !conversation.isRunning {
             conversation = ConversationState(threadID: thread.id)
@@ -662,11 +696,15 @@ final class CodexMobileStore: ObservableObject {
         guard canChangeSessionSettings else { return }
         let previous = selectedModelID
         let previousEffort = selectedReasoningEffort
+        let previousServiceTier = selectedServiceTier
         selectedModelID = model.model
         if !model.supportedReasoningEfforts.isEmpty,
            !model.supportedReasoningEfforts.contains(selectedReasoningEffort)
         {
             selectedReasoningEffort = model.defaultReasoningEffort ?? model.supportedReasoningEfforts.first ?? selectedReasoningEffort
+        }
+        if !serviceTiers(for: model).contains(selectedServiceTier) {
+            selectedServiceTier = .standard
         }
         await writeSessionSettings(
             edits: [
@@ -676,6 +714,7 @@ final class CodexMobileStore: ObservableObject {
             rollback: {
                 self.selectedModelID = previous
                 self.selectedReasoningEffort = previousEffort
+                self.selectedServiceTier = previousServiceTier
             }
         )
     }
@@ -705,6 +744,11 @@ final class CodexMobileStore: ObservableObject {
                 self.selectedPermissionPreset = previous
             }
         )
+    }
+
+    func changeServiceTier(to tier: CodexServiceTier) {
+        guard canChangeSessionSettings, availableServiceTiers.contains(tier) else { return }
+        selectedServiceTier = tier
     }
 
     func interrupt() async {
@@ -837,6 +881,9 @@ final class CodexMobileStore: ObservableObject {
                     if (isLoadingHistoryContent || isLoadingMoreHistory),
                        isMessageTooLongMessage(message)
                     {
+                        continue
+                    }
+                    if isMessageTooLongMessage(message) {
                         continue
                     }
                     connectionState = classifyConnectionError(AppServerClientError.transport(message))
@@ -988,7 +1035,6 @@ final class CodexMobileStore: ObservableObject {
     }
 
     private func scheduleThreadListRefresh(delay: Duration = .milliseconds(800)) {
-        guard !isDesignPreviewMode else { return }
         threadListRefreshTask?.cancel()
         threadListRefreshTask = Task { @MainActor in
             do {
@@ -1008,7 +1054,7 @@ final class CodexMobileStore: ObservableObject {
             while !Task.isCancelled {
                 do {
                     try await Task.sleep(for: .seconds(3))
-                    guard self.isConnected, !self.isDesignPreviewMode else { continue }
+                    guard self.isConnected else { continue }
                     try await self.loadThreads()
                     await self.refreshSelectedThreadContent()
                 } catch is CancellationError {
@@ -1024,7 +1070,6 @@ final class CodexMobileStore: ObservableObject {
         delay: Duration = .milliseconds(600),
         forceLatest: Bool = false
     ) {
-        guard !isDesignPreviewMode else { return }
         threadContentRefreshTask?.cancel()
         threadContentRefreshTask = Task { @MainActor in
             do {
@@ -1039,7 +1084,6 @@ final class CodexMobileStore: ObservableObject {
 
     private func refreshSelectedThreadContent(forceLatest: Bool = false) async {
         guard isConnected,
-              !isDesignPreviewMode,
               shouldLoadHistoryContent,
               !conversation.isRunning,
               !isLoadingHistoryContent,
@@ -1099,7 +1143,6 @@ final class CodexMobileStore: ObservableObject {
             connectionState = .unpaired
             return
         }
-        isDesignPreviewMode = false
         connectionState = .connecting
         let (generation, reconnectClient) = prepareClientForConnection()
         do {
@@ -1171,7 +1214,8 @@ final class CodexMobileStore: ObservableObject {
         CodexSessionSettings(
             model: selectedModelID,
             reasoningEffort: selectedReasoningEffort,
-            permissionPreset: selectedPermissionPreset
+            permissionPreset: selectedPermissionPreset,
+            serviceTier: activeServiceTier
         )
     }
 
@@ -1233,6 +1277,14 @@ final class CodexMobileStore: ObservableObject {
             } else if let defaultEffort = selectedModel.defaultReasoningEffort {
                 selectedReasoningEffort = defaultEffort
             }
+            if let serviceTier = CodexServiceTier.fromConfig(
+                config["serviceTier"]
+                    ?? config["service_tier"]
+                    ?? config["default_service_tier"]
+                    ?? config["default-service-tier"]
+            ) {
+                selectedServiceTier = serviceTier
+            }
             selectedPermissionPreset = CodexPermissionPreset.fromConfig(
                 approvalPolicy: config["approval_policy"],
                 sandboxMode: config["sandbox_mode"]
@@ -1247,7 +1299,6 @@ final class CodexMobileStore: ObservableObject {
     }
 
     private func writeSessionSettings(edits: [(String, JSONValue)], rollback: @escaping () -> Void) async {
-        guard !isDesignPreviewMode else { return }
         isUpdatingSessionSettings = true
         defer { isUpdatingSessionSettings = false }
         do {
@@ -1276,6 +1327,11 @@ final class CodexMobileStore: ObservableObject {
         default: value
         }
     }
+
+    private func serviceTiers(for model: CodexModelOption) -> [CodexServiceTier] {
+        let additionalTiers = Set(model.additionalSpeedTiers.map { $0.lowercased() })
+        return additionalTiers.contains(CodexServiceTier.fast.rawValue) ? [.standard, .fast] : [.standard]
+    }
 }
 
 extension CodexMobileStore: TerminalFeatureActionProviding, WorkspaceFileDataSource {
@@ -1292,13 +1348,13 @@ extension CodexMobileStore: TerminalFeatureActionProviding, WorkspaceFileDataSou
     }
 
     func refreshAutomations() async {
-        guard isConnected, !isDesignPreviewMode else {
+        guard isConnected else {
             automationsState = .unsupported(message: "请先连接 Codex app-server。")
             return
         }
         automationsState = .loading
         do {
-            let tasks = try await client.listAutomationTasks()
+            let tasks = try await loadAutomationTasks()
             automationsState = .loaded(
                 automations: tasks.map(automationViewModel),
                 lastUpdated: formattedNow()
@@ -1308,16 +1364,48 @@ extension CodexMobileStore: TerminalFeatureActionProviding, WorkspaceFileDataSou
         }
     }
 
+    private func loadAutomationTasks() async throws -> [CodexAutomationTaskSummary] {
+        do {
+            let tasks = try await client.listAutomationTasks()
+            if tasks.isEmpty,
+               let rootPath = localAutomationStoreRootPath()
+            {
+                let localTasks = try await client.listLocalAutomationTasks(rootPath: rootPath)
+                return localTasks.isEmpty ? tasks : localTasks
+            }
+            return tasks
+        } catch {
+            guard isUnsupportedAutomationListError(error),
+                  let rootPath = localAutomationStoreRootPath()
+            else { throw error }
+            return try await client.listLocalAutomationTasks(rootPath: rootPath)
+        }
+    }
+
     func refreshContextUsage() async {
-        guard isConnected || isDesignPreviewMode else {
+        guard isConnected else {
             contextUsageState = .unsupported(message: "请先连接 Codex app-server。")
             return
         }
         updateContextUsageState()
     }
 
+    func refreshUsageQuota() async {
+        guard isConnected else {
+            usageQuotaState = .unsupported(message: "请先连接 Codex app-server。")
+            return
+        }
+        usageQuotaState = .loading
+        do {
+            let quota = try await client.getUsageQuota()
+            usageQuotaState = .loaded(quota, lastUpdated: formattedNow())
+        } catch {
+            usageQuotaState = usageQuotaUnsupportedOrErrorState(error)
+        }
+    }
+
     func requestContextCompact() async {
-        guard isConnected, !isDesignPreviewMode, let threadID = selectedThread?.id else {
+        guard isConnected, let threadID = selectedThread?.id else {
             contextCompactStatus = .unavailable("请先选择一个已连接的会话。")
             updateContextUsageState()
             return
@@ -1335,7 +1423,7 @@ extension CodexMobileStore: TerminalFeatureActionProviding, WorkspaceFileDataSou
     }
 
     func listDirectory(pairing: PairingPayload, relativePath: String) async throws -> WorkspaceDirectoryListing {
-        guard isConnected, !isDesignPreviewMode else {
+        guard isConnected else {
             throw WorkspaceFeatureError.notConnected
         }
         let sanitizedPath = sanitizedWorkspaceRelativePath(relativePath)
@@ -1348,7 +1436,7 @@ extension CodexMobileStore: TerminalFeatureActionProviding, WorkspaceFileDataSou
     }
 
     func loadFileData(pairing: PairingPayload, relativePath: String, byteLimit: Int) async throws -> Data {
-        guard isConnected, !isDesignPreviewMode else {
+        guard isConnected else {
             throw WorkspaceFeatureError.notConnected
         }
         let sanitizedPath = sanitizedWorkspaceRelativePath(relativePath)
@@ -1367,7 +1455,7 @@ extension CodexMobileStore: TerminalFeatureActionProviding, WorkspaceFileDataSou
     }
 
     private func runTerminalCommand(_ request: TerminalCommandRequest) async throws -> AsyncThrowingStream<TerminalCommandEvent, Error> {
-        guard isConnected, !isDesignPreviewMode else {
+        guard isConnected else {
             throw TerminalFeatureError.unsupported
         }
 
@@ -1424,6 +1512,8 @@ extension CodexMobileStore: TerminalFeatureActionProviding, WorkspaceFileDataSou
             switch method {
             case "thread/tokenUsage/updated":
                 break
+            case "account/rateLimits/updated":
+                updateUsageQuotaState(from: params)
             case "thread/compacted":
                 contextCompactStatus = .compacted(message: "当前会话上下文已压缩。")
                 updateContextUsageState()
@@ -1481,6 +1571,13 @@ extension CodexMobileStore: TerminalFeatureActionProviding, WorkspaceFileDataSou
         updateContextUsageState()
     }
 
+    private func updateUsageQuotaState(from value: JSONValue?) {
+        guard let value,
+              let quota = CodexUsageQuota.parse(value)
+        else { return }
+        usageQuotaState = .loaded(quota, lastUpdated: formattedNow())
+    }
+
     private func compactStatus(for usage: CodexTokenUsage) -> ContextUsageFeatureView.CompactStatus {
         guard let percentRemaining = usage.percentRemaining else {
             return .available
@@ -1501,11 +1598,33 @@ extension CodexMobileStore: TerminalFeatureActionProviding, WorkspaceFileDataSou
 
     private func unsupportedOrErrorState(_ error: Error) -> AutomationsFeatureView.ContentState {
         let message = error.localizedDescription
+        if isUnsupportedAutomationListError(error) {
+            return .unsupported(message: "当前 Codex app-server 不支持自动化列表接口。")
+        }
+        return .error(message: message, lastUpdated: formattedNow())
+    }
+
+    private func isUnsupportedAutomationListError(_ error: Error) -> Bool {
+        if case let AppServerClientError.requestFailed(rpcError) = error,
+           rpcError.code == -32601
+        {
+            return true
+        }
+        let message = error.localizedDescription
+        return message.localizedCaseInsensitiveContains("method") ||
+            message.localizedCaseInsensitiveContains("not found") ||
+            message.localizedCaseInsensitiveContains("unknown") ||
+            message.localizedCaseInsensitiveContains("unsupported")
+    }
+
+    private func usageQuotaUnsupportedOrErrorState(_ error: Error) -> UsageQuotaContentState {
+        let message = error.localizedDescription
         if message.localizedCaseInsensitiveContains("method") ||
             message.localizedCaseInsensitiveContains("not found") ||
+            message.localizedCaseInsensitiveContains("unknown") ||
             message.localizedCaseInsensitiveContains("unsupported")
         {
-            return .unsupported(message: "当前 Codex app-server 不支持自动化列表接口。")
+            return .unsupported(message: "当前 Codex app-server 不支持使用额度接口。")
         }
         return .error(message: message, lastUpdated: formattedNow())
     }
@@ -1522,10 +1641,29 @@ extension CodexMobileStore: TerminalFeatureActionProviding, WorkspaceFileDataSou
             detail: AutomationsFeatureView.Detail(
                 triggerDescription: task.schedule,
                 prompt: task.prompt,
-                targetDescription: task.raw.objectValue?["destination"]?.stringValue,
+                targetDescription: automationTargetDescription(task),
                 metadata: automationMetadataRows(task)
             )
         )
+    }
+
+    private func automationTargetDescription(_ task: CodexAutomationTaskSummary) -> String? {
+        guard let object = task.raw.objectValue else { return nil }
+        for key in ["destination", "target", "workspace", "project"] {
+            guard let value = object[key] else { continue }
+            if let string = value.stringValue, !string.isEmpty {
+                return string
+            }
+            if let nested = value.objectValue {
+                let candidates = ["name", "title", "path", "cwd", "id"]
+                for candidate in candidates {
+                    if let string = nested[candidate]?.stringValue, !string.isEmpty {
+                        return string
+                    }
+                }
+            }
+        }
+        return nil
     }
 
     private func automationStatus(_ status: String, isEnabled: Bool?) -> AutomationsFeatureView.AutomationStatus {
@@ -1624,6 +1762,26 @@ extension CodexMobileStore: TerminalFeatureActionProviding, WorkspaceFileDataSou
         return sanitized.isEmpty ? "/" : "/" + sanitized
     }
 
+    private func localAutomationStoreRootPath() -> String? {
+        guard let homeDirectory = inferredHomeDirectory(from: pairing?.cwd ?? "") else { return nil }
+        return "\(homeDirectory)/.codex/automations"
+    }
+
+    private func inferredHomeDirectory(from cwd: String) -> String? {
+        let absolute = normalizedAbsolutePath(cwd)
+        let components = absolute.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+        if components.count >= 2, components[0] == "Users" {
+            return "/Users/\(components[1])"
+        }
+        if components.first == "root" {
+            return "/root"
+        }
+        if components.count >= 2, components[0] == "var", components[1] == "root" {
+            return "/var/root"
+        }
+        return nil
+    }
+
     func formattedNow() -> String {
         Date().formatted(date: .omitted, time: .shortened)
     }
@@ -1649,7 +1807,8 @@ private enum WorkspaceFeatureError: LocalizedError {
 extension CodexMobileStore {
     static func preview() -> CodexMobileStore {
         let store = CodexMobileStore()
-        store.connectionState = .preview
+        store.connectionState = .connected
+        store.isRestoringSavedPairing = false
         let payload = try? PairingPayload(
             name: "Mac",
             host: "192.168.1.22",
@@ -1680,6 +1839,7 @@ extension CodexMobileStore {
                 displayName: "GPT-5.5",
                 defaultReasoningEffort: "xhigh",
                 supportedReasoningEfforts: ["medium", "high", "xhigh"],
+                additionalSpeedTiers: ["fast"],
                 isDefault: true
             ),
             CodexModelOption(
@@ -1687,11 +1847,13 @@ extension CodexMobileStore {
                 model: "gpt-5.4",
                 displayName: "GPT-5.4",
                 defaultReasoningEffort: "high",
-                supportedReasoningEfforts: ["medium", "high", "xhigh"]
+                supportedReasoningEfforts: ["medium", "high", "xhigh"],
+                additionalSpeedTiers: ["fast"]
             ),
         ]
         store.selectedModelID = "gpt-5.5"
         store.selectedReasoningEffort = "xhigh"
+        store.selectedServiceTier = .fast
         store.selectedPermissionPreset = .fullAccess
         return store
     }

@@ -244,6 +244,175 @@ public struct CodexTokenUsage: Equatable, Sendable {
     }
 }
 
+public struct CodexUsageQuota: Equatable, Sendable {
+    public var usedFraction: Double?
+    public var remainingFraction: Double?
+    public var limitID: String?
+    public var limitName: String?
+    public var planType: String?
+    public var resetsAt: Date?
+    public var windowDurationMinutes: Int?
+    public var creditBalance: String?
+    public var isUnlimited: Bool
+    public var raw: JSONValue
+
+    public init(
+        usedFraction: Double? = nil,
+        remainingFraction: Double? = nil,
+        limitID: String? = nil,
+        limitName: String? = nil,
+        planType: String? = nil,
+        resetsAt: Date? = nil,
+        windowDurationMinutes: Int? = nil,
+        creditBalance: String? = nil,
+        isUnlimited: Bool = false,
+        raw: JSONValue = .object([:])
+    ) {
+        self.usedFraction = usedFraction
+        self.remainingFraction = remainingFraction
+        self.limitID = limitID
+        self.limitName = limitName
+        self.planType = planType
+        self.resetsAt = resetsAt
+        self.windowDurationMinutes = windowDurationMinutes
+        self.creditBalance = creditBalance
+        self.isUnlimited = isUnlimited
+        self.raw = raw
+    }
+
+    public var resolvedUsedFraction: Double? {
+        if let usedFraction {
+            return Self.clampedFraction(usedFraction)
+        }
+        if let remainingFraction {
+            return Self.clampedFraction(1 - remainingFraction)
+        }
+        return isUnlimited ? 0 : nil
+    }
+
+    public var resolvedRemainingFraction: Double? {
+        if let remainingFraction {
+            return Self.clampedFraction(remainingFraction)
+        }
+        if let usedFraction {
+            return Self.clampedFraction(1 - usedFraction)
+        }
+        return isUnlimited ? 1 : nil
+    }
+
+    public static func parse(_ value: JSONValue) -> CodexUsageQuota? {
+        if let snapshot = preferredRateLimitSnapshot(in: value),
+           let quota = parseSnapshot(snapshot, raw: value)
+        {
+            return quota
+        }
+        if let quota = parseSnapshot(value, raw: value) {
+            return quota
+        }
+        switch value {
+        case let .object(object):
+            let wrapperKeys = [
+                "usageQuota", "usage_quota", "quota", "usage",
+                "rateLimits", "rate_limits", "rateLimit", "rate_limit",
+                "limits", "accountUsage", "account_usage", "billing",
+                "subscription", "data",
+            ]
+            for key in wrapperKeys {
+                if let nested = object[key], let quota = parse(nested) {
+                    return quota
+                }
+            }
+        case let .array(values):
+            for value in values {
+                if let quota = parse(value) {
+                    return quota
+                }
+            }
+        case .null, .bool, .number, .string:
+            break
+        }
+        return nil
+    }
+
+    private static func preferredRateLimitSnapshot(in value: JSONValue) -> JSONValue? {
+        guard let object = value.objectValue else { return nil }
+        if let snapshots = object["rateLimitsByLimitId"]?.objectValue ?? object["rate_limits_by_limit_id"]?.objectValue {
+            if let codex = snapshots["codex"] {
+                return codex
+            }
+            if let preferred = snapshots.values.first(where: { snapshot in
+                let object = snapshot.objectValue
+                return object?["limitId"]?.stringValue == "codex" ||
+                    object?["limit_id"]?.stringValue == "codex"
+            }) {
+                return preferred
+            }
+            return snapshots.values.first
+        }
+        return object["rateLimits"] ?? object["rate_limits"]
+    }
+
+    private static func parseSnapshot(_ value: JSONValue, raw: JSONValue) -> CodexUsageQuota? {
+        guard let object = value.objectValue else { return nil }
+        let window = firstObject(
+            in: object,
+            keys: ["primary", "current", "window", "usageWindow", "usage_window", "secondary"]
+        ) ?? object
+        let usedFraction = normalizedFraction(CodexFeatureParsing.double(window, keys: [
+            "usedPercent", "used_percent", "percentUsed", "percent_used",
+            "usedPct", "used_pct", "usedFraction", "used_fraction",
+        ]))
+        let remainingFraction = normalizedFraction(CodexFeatureParsing.double(window, keys: [
+            "remainingPercent", "remaining_percent", "percentRemaining", "percent_remaining",
+            "remainingPct", "remaining_pct", "remainingFraction", "remaining_fraction",
+        ]))
+        let credits = object["credits"]?.objectValue
+        let isUnlimited = CodexFeatureParsing.bool(credits ?? [:], keys: ["unlimited"]) ??
+            CodexFeatureParsing.bool(object, keys: ["unlimited"]) ??
+            false
+        let creditBalance = CodexFeatureParsing.string(credits ?? [:], keys: ["balance"])
+        let hasSignal = usedFraction != nil ||
+            remainingFraction != nil ||
+            isUnlimited ||
+            creditBalance != nil
+        guard hasSignal else { return nil }
+
+        return CodexUsageQuota(
+            usedFraction: usedFraction,
+            remainingFraction: remainingFraction,
+            limitID: CodexFeatureParsing.string(object, keys: ["limitId", "limit_id", "id"]),
+            limitName: CodexFeatureParsing.string(object, keys: ["limitName", "limit_name", "name", "title"]),
+            planType: CodexFeatureParsing.string(object, keys: ["planType", "plan_type", "planName", "plan_name", "plan"]),
+            resetsAt: CodexFeatureParsing.date(window, keys: ["resetsAt", "resets_at", "resetAt", "reset_at"]),
+            windowDurationMinutes: CodexFeatureParsing.int(window, keys: [
+                "windowDurationMins", "window_duration_mins",
+                "windowDurationMinutes", "window_duration_minutes",
+            ]),
+            creditBalance: creditBalance,
+            isUnlimited: isUnlimited,
+            raw: raw
+        )
+    }
+
+    private static func firstObject(in object: [String: JSONValue], keys: [String]) -> [String: JSONValue]? {
+        for key in keys {
+            if let nested = object[key]?.objectValue {
+                return nested
+            }
+        }
+        return nil
+    }
+
+    private static func normalizedFraction(_ value: Double?) -> Double? {
+        guard let value else { return nil }
+        return clampedFraction(value > 1 ? value / 100 : value)
+    }
+
+    private static func clampedFraction(_ value: Double) -> Double {
+        min(1, max(0, value))
+    }
+}
+
 public struct CodexAutomationTaskSummary: Identifiable, Equatable, Sendable {
     public var id: String
     public var title: String
@@ -284,13 +453,16 @@ public struct CodexAutomationTaskSummary: Identifiable, Equatable, Sendable {
     }
 
     public static func parseListResponse(_ value: JSONValue) -> [CodexAutomationTaskSummary] {
-        CodexFeatureParsing.array(value, keys: ["data", "tasks", "items", "automations"])
+        CodexFeatureParsing.array(value, keys: ["data", "tasks", "items", "automations", "automationTasks", "automation_tasks"])
             .compactMap(parse)
     }
 
     public static func parseGetResponse(_ value: JSONValue) -> CodexAutomationTaskSummary? {
         if let task = value.objectValue?["task"] {
             return parse(task)
+        }
+        if let automation = value.objectValue?["automation"] {
+            return parse(automation)
         }
         if let data = value.objectValue?["data"] {
             return parse(data)
@@ -300,21 +472,283 @@ public struct CodexAutomationTaskSummary: Identifiable, Equatable, Sendable {
 
     public static func parse(_ value: JSONValue) -> CodexAutomationTaskSummary? {
         guard let object = value.objectValue else { return nil }
-        let id = CodexFeatureParsing.string(object, keys: ["id", "taskId", "taskID"]) ?? ""
-        let title = CodexFeatureParsing.string(object, keys: ["title", "name", "summary"]) ?? id
+        let id = CodexFeatureParsing.string(object, keys: [
+            "id", "taskId", "taskID", "task_id",
+            "automationId", "automationID", "automation_id", "key",
+        ]) ?? ""
+        let title = CodexFeatureParsing.string(object, keys: ["title", "name", "displayName", "label", "summary"]) ?? id
         return CodexAutomationTaskSummary(
             id: id,
             title: title,
-            status: CodexFeatureParsing.string(object, keys: ["status", "state"]) ?? "unknown",
-            schedule: CodexFeatureParsing.string(object, keys: ["schedule", "cron", "cadence"]),
-            prompt: CodexFeatureParsing.string(object, keys: ["prompt", "input", "description"]),
-            nextRunAt: CodexFeatureParsing.date(object, keys: ["nextRunAt", "next_run_at"]),
-            lastRunAt: CodexFeatureParsing.date(object, keys: ["lastRunAt", "last_run_at"]),
+            status: CodexFeatureParsing.string(object, keys: ["status", "state", "runStatus", "run_status"]) ?? "unknown",
+            schedule: CodexFeatureParsing.string(object, keys: [
+                "schedule", "scheduleDescription", "schedule_description", "cron", "cadence", "rrule",
+            ]),
+            prompt: CodexFeatureParsing.string(object, keys: ["prompt", "input", "instructions", "instruction", "description"]),
+            nextRunAt: CodexFeatureParsing.date(object, keys: ["nextRunAt", "next_run_at", "nextRun", "next_run"]),
+            lastRunAt: CodexFeatureParsing.date(object, keys: ["lastRunAt", "last_run_at", "lastRun", "last_run"]),
             createdAt: CodexFeatureParsing.date(object, keys: ["createdAt", "created_at"]),
             updatedAt: CodexFeatureParsing.date(object, keys: ["updatedAt", "updated_at"]),
-            isEnabled: CodexFeatureParsing.bool(object, keys: ["isEnabled", "enabled"]),
+            isEnabled: CodexFeatureParsing.bool(object, keys: ["isEnabled", "is_enabled", "enabled", "active"]),
             raw: value
         )
+    }
+
+    public static func parseAutomationTOML(_ toml: String, fallbackID: String? = nil) -> CodexAutomationTaskSummary? {
+        var object = parseTopLevelTOML(toml)
+        let id = CodexFeatureParsing.string(object, keys: ["id", "automation_id", "key"]) ?? fallbackID ?? ""
+        guard !id.isEmpty else { return nil }
+        if object["id"] == nil {
+            object["id"] = .string(id)
+        }
+        let status = CodexFeatureParsing.string(object, keys: ["status", "state"]) ?? "unknown"
+        let enabled = isEnabled(status: status) ?? CodexFeatureParsing.bool(object, keys: ["enabled", "is_enabled"])
+
+        return CodexAutomationTaskSummary(
+            id: id,
+            title: CodexFeatureParsing.string(object, keys: ["name", "title", "displayName", "label"]) ?? id,
+            status: status,
+            schedule: CodexFeatureParsing.string(object, keys: ["rrule", "schedule", "cron", "cadence"]),
+            prompt: CodexFeatureParsing.string(object, keys: ["prompt", "instructions", "instruction", "description"]),
+            createdAt: tomlDate(object, keys: ["created_at", "createdAt"]),
+            updatedAt: tomlDate(object, keys: ["updated_at", "updatedAt"]),
+            isEnabled: enabled,
+            raw: .object(object)
+        )
+    }
+
+    public static func parseAutomationTOMLDump(_ dump: String) -> [CodexAutomationTaskSummary] {
+        let beginPrefix = "__CODEX_MOBILE_AUTOMATION_BEGIN__ "
+        let endMarker = "__CODEX_MOBILE_AUTOMATION_END__"
+        var tasks: [CodexAutomationTaskSummary] = []
+        var currentPath: String?
+        var currentLines: [String] = []
+
+        func flushCurrentTask() {
+            guard let path = currentPath else { return }
+            let fallbackID = URL(fileURLWithPath: path).deletingLastPathComponent().lastPathComponent
+            if let task = parseAutomationTOML(currentLines.joined(separator: "\n"), fallbackID: fallbackID) {
+                tasks.append(task)
+            }
+            currentPath = nil
+            currentLines = []
+        }
+
+        for line in dump.components(separatedBy: .newlines) {
+            if line.hasPrefix(beginPrefix) {
+                flushCurrentTask()
+                currentPath = String(line.dropFirst(beginPrefix.count))
+                currentLines = []
+            } else if line == endMarker {
+                flushCurrentTask()
+            } else if currentPath != nil {
+                currentLines.append(line)
+            }
+        }
+        flushCurrentTask()
+        return tasks
+    }
+
+    private static func isEnabled(status: String) -> Bool? {
+        switch status.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "enabled", "active", "running", "scheduled":
+            true
+        case "disabled", "paused", "pause", "inactive":
+            false
+        default:
+            nil
+        }
+    }
+
+    private static func tomlDate(_ object: [String: JSONValue], keys: [String]) -> Date? {
+        for key in keys {
+            guard let value = object[key] else { continue }
+            if let number = value.numberValue {
+                return Date(timeIntervalSince1970: normalizedUnixTimestamp(number))
+            }
+            if let string = value.stringValue {
+                if let number = Double(string) {
+                    return Date(timeIntervalSince1970: normalizedUnixTimestamp(number))
+                }
+                if let date = ISO8601DateFormatter().date(from: string) {
+                    return date
+                }
+            }
+        }
+        return nil
+    }
+
+    private static func normalizedUnixTimestamp(_ value: Double) -> Double {
+        abs(value) > 10_000_000_000 ? value / 1_000 : value
+    }
+
+    private static func parseTopLevelTOML(_ toml: String) -> [String: JSONValue] {
+        var result: [String: JSONValue] = [:]
+        let lines = toml.components(separatedBy: .newlines)
+        var index = 0
+        while index < lines.count {
+            var line = stripTOMLComment(lines[index]).trimmingCharacters(in: .whitespacesAndNewlines)
+            index += 1
+            guard !line.isEmpty, !line.hasPrefix("[") else { continue }
+            guard let separator = line.firstIndex(of: "=") else { continue }
+            let key = line[..<separator].trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !key.isEmpty else { continue }
+            var rawValue = line[line.index(after: separator)...].trimmingCharacters(in: .whitespacesAndNewlines)
+
+            if rawValue.hasPrefix("\"\"\""), !rawValue.dropFirst(3).contains("\"\"\"") {
+                while index < lines.count {
+                    let nextLine = lines[index]
+                    rawValue += "\n" + nextLine
+                    index += 1
+                    if nextLine.contains("\"\"\"") { break }
+                }
+                line = rawValue
+                rawValue = line
+            }
+
+            result[String(key)] = parseTOMLValue(String(rawValue))
+        }
+        return result
+    }
+
+    private static func stripTOMLComment(_ line: String) -> String {
+        var output = ""
+        var isInBasicString = false
+        var isInLiteralString = false
+        var isEscaped = false
+        for character in line {
+            if isEscaped {
+                output.append(character)
+                isEscaped = false
+                continue
+            }
+            if character == "\\" && isInBasicString {
+                output.append(character)
+                isEscaped = true
+                continue
+            }
+            if character == "\"", !isInLiteralString {
+                isInBasicString.toggle()
+                output.append(character)
+                continue
+            }
+            if character == "'", !isInBasicString {
+                isInLiteralString.toggle()
+                output.append(character)
+                continue
+            }
+            if character == "#", !isInBasicString, !isInLiteralString {
+                break
+            }
+            output.append(character)
+        }
+        return output
+    }
+
+    private static func parseTOMLValue(_ rawValue: String) -> JSONValue {
+        let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasPrefix("\"\"\""), trimmed.hasSuffix("\"\"\""), trimmed.count >= 6 {
+            let inner = String(trimmed.dropFirst(3).dropLast(3))
+            return .string(unescapeBasicTOMLString(inner))
+        }
+        if trimmed.hasPrefix("'''"), trimmed.hasSuffix("'''"), trimmed.count >= 6 {
+            return .string(String(trimmed.dropFirst(3).dropLast(3)))
+        }
+        if trimmed.hasPrefix("\""), trimmed.hasSuffix("\""), trimmed.count >= 2 {
+            let inner = String(trimmed.dropFirst().dropLast())
+            return .string(unescapeBasicTOMLString(inner))
+        }
+        if trimmed.hasPrefix("'"), trimmed.hasSuffix("'"), trimmed.count >= 2 {
+            return .string(String(trimmed.dropFirst().dropLast()))
+        }
+        if trimmed.hasPrefix("["), trimmed.hasSuffix("]") {
+            return .array(parseTOMLArray(String(trimmed.dropFirst().dropLast())))
+        }
+        switch trimmed.lowercased() {
+        case "true":
+            return .bool(true)
+        case "false":
+            return .bool(false)
+        default:
+            if let number = Double(trimmed.replacingOccurrences(of: "_", with: "")) {
+                return .number(number)
+            }
+            return .string(trimmed)
+        }
+    }
+
+    private static func parseTOMLArray(_ rawValue: String) -> [JSONValue] {
+        var items: [JSONValue] = []
+        var current = ""
+        var isInBasicString = false
+        var isInLiteralString = false
+        var isEscaped = false
+        for character in rawValue {
+            if isEscaped {
+                current.append(character)
+                isEscaped = false
+                continue
+            }
+            if character == "\\" && isInBasicString {
+                current.append(character)
+                isEscaped = true
+                continue
+            }
+            if character == "\"", !isInLiteralString {
+                isInBasicString.toggle()
+                current.append(character)
+                continue
+            }
+            if character == "'", !isInBasicString {
+                isInLiteralString.toggle()
+                current.append(character)
+                continue
+            }
+            if character == ",", !isInBasicString, !isInLiteralString {
+                let value = current.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !value.isEmpty {
+                    items.append(parseTOMLValue(value))
+                }
+                current = ""
+                continue
+            }
+            current.append(character)
+        }
+        let value = current.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !value.isEmpty {
+            items.append(parseTOMLValue(value))
+        }
+        return items
+    }
+
+    private static func unescapeBasicTOMLString(_ value: String) -> String {
+        var output = ""
+        var iterator = value.makeIterator()
+        while let character = iterator.next() {
+            guard character == "\\", let escaped = iterator.next() else {
+                output.append(character)
+                continue
+            }
+            switch escaped {
+            case "b":
+                output.append("\u{0008}")
+            case "t":
+                output.append("\t")
+            case "n":
+                output.append("\n")
+            case "f":
+                output.append("\u{000C}")
+            case "r":
+                output.append("\r")
+            case "\"":
+                output.append("\"")
+            case "\\":
+                output.append("\\")
+            default:
+                output.append(escaped)
+            }
+        }
+        return output
     }
 }
 
@@ -535,12 +969,11 @@ public struct CodexCommandExecRequest: Equatable, Sendable {
     }
 
     public var jsonValue: JSONValue {
-        var params: [String: JSONValue] = ["command": .string(command)]
+        var params: [String: JSONValue] = [
+            "command": .array(([command] + args).map { .string($0) }),
+        ]
         if let cwd {
             params["cwd"] = .string(cwd)
-        }
-        if !args.isEmpty {
-            params["args"] = .array(args.map { .string($0) })
         }
         if !env.isEmpty {
             params["env"] = .object(env.mapValues { .string($0) })
@@ -548,14 +981,14 @@ public struct CodexCommandExecRequest: Equatable, Sendable {
         if let stdin {
             params["stdin"] = .string(stdin)
         }
-        if let cols {
-            params["cols"] = .number(Double(cols))
-        }
-        if let rows {
-            params["rows"] = .number(Double(rows))
+        if let cols, let rows {
+            params["size"] = [
+                "cols": .number(Double(cols)),
+                "rows": .number(Double(rows)),
+            ]
         }
         if let timeoutSeconds {
-            params["timeoutSeconds"] = .number(timeoutSeconds)
+            params["timeoutMs"] = .number(timeoutSeconds * 1_000)
         }
         return .object(params)
     }

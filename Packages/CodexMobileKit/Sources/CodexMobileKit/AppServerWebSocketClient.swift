@@ -206,21 +206,7 @@ public final class AppServerWebSocketClient {
 
     @discardableResult
     public func startThread(cwd: String, settings: CodexSessionSettings) async throws -> JSONValue {
-        var params: [String: JSONValue] = [
-            "cwd": .string(cwd),
-            "approvalsReviewer": "user",
-            "approvalPolicy": settings.permissionPreset.approvalPolicy,
-            "sandbox": settings.permissionPreset.sandboxMode,
-            "experimentalRawEvents": false,
-            "persistExtendedHistory": true,
-        ]
-        if let model = settings.model {
-            params["model"] = .string(model)
-        }
-        if let reasoningEffort = settings.reasoningEffort {
-            params["config"] = ["model_reasoning_effort": .string(reasoningEffort)]
-        }
-        return try await sendRequest(method: "thread/start", params: .object(params))
+        try await sendRequest(method: "thread/start", params: Self.threadStartParams(cwd: cwd, settings: settings))
     }
 
     @discardableResult
@@ -246,8 +232,10 @@ public final class AppServerWebSocketClient {
         )
     }
 
-    // startTurn is defined in AppServerWebSocketClient+Features.swift
-    // with the full parameter set including collaborationMode.
+    @discardableResult
+    public func startTurn(threadID: String, text: String, cwd: String, settings: CodexSessionSettings) async throws -> JSONValue {
+        try await sendRequest(method: "turn/start", params: Self.turnStartParams(threadID: threadID, text: text, cwd: cwd, settings: settings))
+    }
 
     @discardableResult
     public func interruptTurn(threadID: String, turnID: String? = nil) async throws -> JSONValue {
@@ -514,6 +502,50 @@ public final class AppServerWebSocketClient {
             "excludeTurns": true,
             "persistExtendedHistory": true,
         ]
+    }
+
+    nonisolated static func threadStartParams(cwd: String, settings: CodexSessionSettings) -> JSONValue {
+        var params: [String: JSONValue] = [
+            "cwd": .string(cwd),
+            "approvalsReviewer": "user",
+            "approvalPolicy": settings.permissionPreset.approvalPolicy,
+            "sandbox": settings.permissionPreset.sandboxMode,
+            "experimentalRawEvents": false,
+            "persistExtendedHistory": true,
+            "serviceTier": .string(settings.serviceTier.rawValue),
+        ]
+        if let model = settings.model {
+            params["model"] = .string(model)
+        }
+        if let reasoningEffort = settings.reasoningEffort {
+            params["config"] = ["model_reasoning_effort": .string(reasoningEffort)]
+        }
+        return .object(params)
+    }
+
+    nonisolated static func turnStartParams(threadID: String, text: String, cwd: String, settings: CodexSessionSettings) -> JSONValue {
+        var params: [String: JSONValue] = [
+            "threadId": .string(threadID),
+            "cwd": .string(cwd),
+            "input": [
+                [
+                    "type": "text",
+                    "text": .string(text),
+                    "text_elements": [],
+                ],
+            ],
+            "approvalsReviewer": "user",
+            "approvalPolicy": settings.permissionPreset.approvalPolicy,
+            "sandboxPolicy": settings.permissionPreset.turnSandboxPolicy(cwd: cwd),
+            "serviceTier": .string(settings.serviceTier.rawValue),
+        ]
+        if let model = settings.model {
+            params["model"] = .string(model)
+        }
+        if let reasoningEffort = settings.reasoningEffort {
+            params["effort"] = .string(reasoningEffort)
+        }
+        return .object(params)
     }
 
     nonisolated static func interruptTurnParams(threadID: String, turnID: String?) -> JSONValue {

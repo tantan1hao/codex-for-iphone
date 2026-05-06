@@ -16,6 +16,7 @@ final class SessionSettingsTests: XCTestCase {
                         ["reasoningEffort": "high"],
                         ["reasoningEffort": "xhigh"],
                     ],
+                    "additionalSpeedTiers": ["fast"],
                 ],
             ],
         ]
@@ -27,6 +28,7 @@ final class SessionSettingsTests: XCTestCase {
         XCTAssertEqual(models.first?.displayName, "GPT-5.5")
         XCTAssertEqual(models.first?.defaultReasoningEffort, "xhigh")
         XCTAssertEqual(models.first?.supportedReasoningEfforts, ["medium", "high", "xhigh"])
+        XCTAssertEqual(models.first?.additionalSpeedTiers, ["fast"])
         XCTAssertEqual(models.first?.isDefault, true)
     }
 
