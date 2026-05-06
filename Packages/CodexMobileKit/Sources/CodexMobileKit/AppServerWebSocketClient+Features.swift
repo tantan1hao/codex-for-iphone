@@ -28,7 +28,7 @@ public extension AppServerWebSocketClient {
         do {
             entries = try await readDirectory(path: rootPath, includeHidden: false)
         } catch {
-            guard Self.isMissingFileError(error) else { throw error }
+            guard Self.shouldFallBackToShellForLocalAutomation(error) else { throw error }
             return try await listLocalAutomationTasksFromShell()
         }
 
@@ -43,6 +43,9 @@ public extension AppServerWebSocketClient {
                 else { continue }
                 tasks.append(task)
             } catch {
+                if Self.isUnsupportedFeatureMethodError(error) {
+                    return try await listLocalAutomationTasksFromShell()
+                }
                 guard Self.isMissingFileError(error) else { throw error }
             }
         }
@@ -274,6 +277,10 @@ private extension AppServerWebSocketClient {
         return message.localizedCaseInsensitiveContains("no such file") ||
             message.localizedCaseInsensitiveContains("not found") ||
             message.localizedCaseInsensitiveContains("does not exist")
+    }
+
+    static func shouldFallBackToShellForLocalAutomation(_ error: Error) -> Bool {
+        isMissingFileError(error) || isUnsupportedFeatureMethodError(error)
     }
 
     static let localAutomationListCommand = #"for file in "$HOME"/.codex/automations/*/automation.toml; do [ -f "$file" ] || continue; printf "__CODEX_MOBILE_AUTOMATION_BEGIN__ %s\n" "$file"; cat "$file"; printf "\n__CODEX_MOBILE_AUTOMATION_END__\n"; done"#
